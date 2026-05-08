@@ -56,10 +56,12 @@ const (
 type Server struct {
 	lokiClient              *k8s.LokiClient
 	githubClient            *github.Client
+	gitlabClient            *GitLabClient
 	dbClients               map[string]*DatabaseClient
 	grafanaClient           *GrafanaClient
 	graphqlClients          map[string]*GraphQLClient
 	prometheusClients       map[string]*PrometheusClient
+	tempoClients            map[string]*TempoClient
 	cloudWatchClientFactory CloudWatchClientFactory
 	apiToolRegistry         *apiconfig.APIToolRegistry
 	logger                  *slog.Logger
@@ -126,6 +128,20 @@ func NewServer(lokiClient *k8s.LokiClient, githubToken string, apiToolRegistry *
 	// Supports PROMETHEUS_URL (default) and PROMETHEUS_<NAME>_URL patterns
 	prometheusClients := LoadPrometheusClients(logger)
 
+	// Initialize GitLab client if configured
+	var gitlabClient *GitLabClient
+	glClient, glErr := NewGitLabClient(logger)
+	if glErr != nil {
+		logger.Info("GitLab not configured - GitLab tools will be unavailable")
+	} else {
+		gitlabClient = glClient
+		logger.Info("GitLab client initialized")
+	}
+
+	// Initialize Tempo clients from environment variables
+	// Supports TEMPO_URL (default) and TEMPO_<NAME>_URL patterns
+	tempoClients := LoadTempoClients(logger)
+
 	// Get company name from environment, default to "Company"
 	companyName := os.Getenv("COMPANY_NAME")
 	if companyName == "" {
@@ -135,10 +151,12 @@ func NewServer(lokiClient *k8s.LokiClient, githubToken string, apiToolRegistry *
 	result = &Server{
 		lokiClient:              lokiClient,
 		githubClient:            githubClient,
+		gitlabClient:            gitlabClient,
 		dbClients:               dbClients,
 		grafanaClient:           grafanaClient,
 		graphqlClients:          graphqlClients,
 		prometheusClients:       prometheusClients,
+		tempoClients:            tempoClients,
 		cloudWatchClientFactory: defaultCloudWatchClientFactory,
 		apiToolRegistry:         apiToolRegistry,
 		logger:                  logger,

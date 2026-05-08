@@ -112,6 +112,8 @@ func (s *SDKServer) registerTools() {
 	s.registerCloudWatchTools()
 	s.registerPrometheusTools()
 	s.registerGraphQLTools()
+	s.registerGitLabTools()
+	s.registerTempoTools()
 	s.registerAPITools()
 
 	s.logger.Info("SDK server tools registered")
@@ -254,6 +256,42 @@ func (s *SDKServer) registerGraphQLTools() {
 	}
 
 	for _, t := range getGraphQLTools() {
+		if h, ok := handlers[t.Name]; ok {
+			s.registerTool(t.Name, t.Description, t.InputSchema, h)
+		}
+	}
+}
+
+func (s *SDKServer) registerGitLabTools() {
+	if s.legacy.gitlabClient == nil {
+		return
+	}
+
+	handlers := map[string]func(context.Context, map[string]interface{}) (string, error){
+		toolGitLabGetFile:       s.legacy.executeGitLabGetFile,
+		toolGitLabListDirectory: s.legacy.executeGitLabListDirectory,
+		toolGitLabSearchCode:    s.legacy.executeGitLabSearchCode,
+	}
+
+	for _, t := range getGitLabTools() {
+		if h, ok := handlers[t.Name]; ok {
+			s.registerTool(t.Name, t.Description, t.InputSchema, h)
+		}
+	}
+}
+
+func (s *SDKServer) registerTempoTools() {
+	if len(s.legacy.tempoClients) == 0 {
+		return
+	}
+
+	handlers := map[string]func(context.Context, map[string]interface{}) (string, error){
+		toolTempoGetTrace:      s.legacy.executeTempoGetTrace,
+		toolTempoSearchTraces:  s.legacy.executeTempoSearchTraces,
+		toolTempoListEndpoints: s.legacy.executeTempoListEndpoints,
+	}
+
+	for _, t := range getTempoTools() {
 		if h, ok := handlers[t.Name]; ok {
 			s.registerTool(t.Name, t.Description, t.InputSchema, h)
 		}
