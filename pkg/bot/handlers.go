@@ -144,12 +144,18 @@ func (b *Bot) startInvestigation(ctx context.Context, channel string, threadTS s
 		b.logger.WarnContext(ctx, "failed to send investigation type message", slog.String("error", err.Error()))
 	}
 
+	// Store original user message for thread context
+	conv.OriginalUserMessage = message
+
 	// Run investigation via Claude Code
 	investigationResult, err := b.claudeCodeRunner.RunInvestigation(ctx, matchResult.Skill, message)
 	if err != nil {
 		b.sendErrorMessage(channel, threadTS, fmt.Sprintf("Error starting investigation: %v", err))
 		return
 	}
+
+	// Store output for thread follow-ups
+	conv.LastOutput = investigationResult
 
 	// Send result to Slack
 	err = b.sendFormattedMessage(channel, threadTS, investigationResult)
@@ -223,12 +229,29 @@ func (b *Bot) handleThreadReply(ctx context.Context, channel string, threadTS st
 		return
 	}
 
+	// Build follow-up prompt with prior context
+	followUpMessage := message
+	if conv.LastOutput != "" {
+		// Truncate prior output to avoid exceeding context limits
+		priorOutput := conv.LastOutput
+		const maxContextLen = 30000
+		if len(priorOutput) > maxContextLen {
+			priorOutput = priorOutput[:maxContextLen] + "\n\n[Prior output truncated]"
+		}
+
+		followUpMessage = fmt.Sprintf("## Prior Investigation Context\n\nOriginal question: %s\n\nPrior investigation output:\n\n%s\n\n## Follow-Up Question\n\n%s",
+			conv.OriginalUserMessage, priorOutput, message)
+	}
+
 	// Run follow-up investigation via Claude Code
-	investigationResult, err := b.claudeCodeRunner.RunInvestigation(ctx, skill, message)
+	investigationResult, err := b.claudeCodeRunner.RunInvestigation(ctx, skill, followUpMessage)
 	if err != nil {
 		b.sendErrorMessage(channel, threadTS, fmt.Sprintf("Error processing follow-up: %v", err))
 		return
 	}
+
+	// Update stored output for subsequent follow-ups
+	conv.LastOutput = investigationResult
 
 	// Send result to Slack
 	err = b.sendFormattedMessage(channel, threadTS, investigationResult)

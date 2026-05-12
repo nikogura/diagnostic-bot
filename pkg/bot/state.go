@@ -19,16 +19,18 @@ const (
 
 // Conversation tracks the state of an investigation conversation.
 type Conversation struct {
-	ID                string
-	InvestigationType investigations.InvestigationType
-	SlackThreadTS     string
-	SlackChannel      string
-	UserID            string
-	StartedAt         time.Time
-	LastActivity      time.Time
-	MessageHistory    []anthropic.Message
-	KubernetesContext map[string]interface{}
-	State             ConversationState
+	ID                  string
+	InvestigationType   investigations.InvestigationType
+	SlackThreadTS       string
+	SlackChannel        string
+	UserID              string
+	StartedAt           time.Time
+	LastActivity        time.Time
+	MessageHistory      []anthropic.Message
+	KubernetesContext   map[string]interface{}
+	State               ConversationState
+	LastOutput          string // Most recent investigation/follow-up output
+	OriginalUserMessage string // The message that triggered the investigation
 }
 
 // ConversationStore manages active conversations.
