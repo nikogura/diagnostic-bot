@@ -36,6 +36,7 @@ RUN apk add --no-cache \
     fontconfig \
     texlive \
     texlive-luatex \
+    texlive-xetex \
     texmf-dist-latexextra \
     texmf-dist-fontsextra \
     pandoc \
