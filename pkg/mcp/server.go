@@ -972,7 +972,61 @@ func (s *Server) executeWhoisLookup(ctx context.Context, args map[string]interfa
 	return result, err
 }
 
+// Allowed pandoc PDF engines — allowlist to prevent command injection via --pdf-engine.
+//
+//nolint:gochecknoglobals // Constant set, initialized once
+var allowedPDFEngines = map[string]bool{
+	"pdflatex":    true,
+	"xelatex":     true,
+	"lualatex":    true,
+	"tectonic":    true,
+	"wkhtmltopdf": true,
+	"weasyprint":  true,
+	"prince":      true,
+	"context":     true,
+}
+
+// Allowed path prefixes for PDF templates — prevents path traversal.
+//
+//nolint:gochecknoglobals // Constant set, initialized once
+var allowedTemplatePrefixes = []string{"/app/", "/etc/", "/tmp/"}
+
+func getPDFEngine() (engine string) {
+	engine = os.Getenv("PDF_ENGINE")
+	if engine == "" {
+		engine = "pdflatex"
+	}
+	return engine
+}
+
+func getPDFTemplate() (tmpl string) {
+	tmpl = os.Getenv("PDF_TEMPLATE")
+	if tmpl == "" {
+		tmpl = "/app/latex-templates/company-template.latex"
+	}
+	return tmpl
+}
+
+func validatePDFEngine(engine string) (err error) {
+	if !allowedPDFEngines[engine] {
+		err = fmt.Errorf("unsupported PDF engine %q: must be one of pdflatex, xelatex, lualatex, tectonic, wkhtmltopdf, weasyprint, prince, context", engine)
+	}
+	return err
+}
+
+func validatePDFTemplate(tmpl string) (err error) {
+	for _, prefix := range allowedTemplatePrefixes {
+		if strings.HasPrefix(tmpl, prefix) {
+			return err
+		}
+	}
+	err = fmt.Errorf("PDF template path %q not under an allowed prefix (/app/, /etc/, /tmp/)", tmpl)
+	return err
+}
+
 // executeGeneratePDF generates a PDF from Markdown content using pandoc.
+//
+//nolint:funlen // Single logical unit: validate, prepare, execute pandoc, handle result
 func (s *Server) executeGeneratePDF(ctx context.Context, args map[string]interface{}) (result string, err error) {
 	markdownContent, _ := args["markdown_content"].(string)
 	filename, _ := args["filename"].(string)
@@ -1011,13 +1065,26 @@ func (s *Server) executeGeneratePDF(ctx context.Context, args map[string]interfa
 	}
 	tmpMD.Close()
 
-	// Convert Markdown to PDF using pandoc with company template
+	// Resolve and validate PDF engine and template
+	pdfEngine := getPDFEngine()
+	err = validatePDFEngine(pdfEngine)
+	if err != nil {
+		return result, err
+	}
+
+	pdfTemplate := getPDFTemplate()
+	err = validatePDFTemplate(pdfTemplate)
+	if err != nil {
+		return result, err
+	}
+
+	// Convert Markdown to PDF using pandoc
 	var cmd *exec.Cmd
 	cmdArgs := []string{
 		"-f", "markdown",
 		"-t", "pdf",
-		"--pdf-engine=pdflatex",
-		"--template=/app/latex-templates/company-template.latex",
+		"--pdf-engine=" + pdfEngine,
+		"--template=" + pdfTemplate,
 		"--toc",
 		"--number-sections",
 		"--highlight-style=tango",
@@ -1036,9 +1103,10 @@ func (s *Server) executeGeneratePDF(ctx context.Context, args map[string]interfa
 
 	cmd = exec.CommandContext(ctx, "pandoc", cmdArgs...)
 
-	// Set TEXINPUTS to include latex-templates directory so LaTeX can find company.cls
-	// The trailing colon is important - it includes the default search paths
-	cmd.Env = append(os.Environ(), "TEXINPUTS=.:/app/latex-templates//:")
+	// Set TEXINPUTS to include the template's directory so LaTeX can find .cls files.
+	// The trailing colon includes the default search paths.
+	templateDir := filepath.Dir(pdfTemplate)
+	cmd.Env = append(os.Environ(), "TEXINPUTS=.:"+templateDir+"//:")
 	cmd.Dir = "/tmp" // Run from /tmp where output file is written
 
 	var stderr bytes.Buffer
@@ -1047,7 +1115,8 @@ func (s *Server) executeGeneratePDF(ctx context.Context, args map[string]interfa
 	cmd.Stdout = &stdout
 
 	s.logger.InfoContext(ctx, "executing pandoc",
-		slog.String("template", "/app/latex-templates/company-template.latex"),
+		slog.String("engine", pdfEngine),
+		slog.String("template", pdfTemplate),
 		slog.String("company_name", s.companyName))
 
 	execErr := cmd.Run()

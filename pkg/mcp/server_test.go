@@ -559,3 +559,88 @@ func TestParseSinglePanelConfigInfinity(t *testing.T) {
 	require.Equal(t, "string", panel.InfinityColumns[0].Type)
 	require.Equal(t, "severity", panel.InfinityColumns[1].Selector)
 }
+
+func TestValidatePDFEngine(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name    string
+		engine  string
+		wantErr bool
+	}{
+		{"pdflatex allowed", "pdflatex", false},
+		{"xelatex allowed", "xelatex", false},
+		{"lualatex allowed", "lualatex", false},
+		{"tectonic allowed", "tectonic", false},
+		{"wkhtmltopdf allowed", "wkhtmltopdf", false},
+		{"weasyprint allowed", "weasyprint", false},
+		{"prince allowed", "prince", false},
+		{"context allowed", "context", false},
+		{"bash rejected", "bash", true},
+		{"empty rejected", "", true},
+		{"path injection rejected", "/bin/sh", true},
+		{"command injection rejected", "pdflatex; rm -rf /", true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			err := validatePDFEngine(tt.engine)
+			if tt.wantErr {
+				require.Error(t, err)
+			} else {
+				require.NoError(t, err)
+			}
+		})
+	}
+}
+
+func TestValidatePDFTemplate(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name    string
+		path    string
+		wantErr bool
+	}{
+		{"app path allowed", "/app/latex-templates/company.latex", false},
+		{"etc path allowed", "/etc/pandoc/template.latex", false},
+		{"tmp path allowed", "/tmp/report-template.latex", false},
+		{"home path rejected", "/home/user/evil.latex", true},
+		{"relative path rejected", "../../../etc/passwd", true},
+		{"root path rejected", "/root/template.latex", true},
+		{"empty path rejected", "", true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			err := validatePDFTemplate(tt.path)
+			if tt.wantErr {
+				require.Error(t, err)
+			} else {
+				require.NoError(t, err)
+			}
+		})
+	}
+}
+
+func TestGetPDFEngineDefault(t *testing.T) {
+	t.Setenv("PDF_ENGINE", "")
+	require.Equal(t, "pdflatex", getPDFEngine())
+}
+
+func TestGetPDFEngineOverride(t *testing.T) {
+	t.Setenv("PDF_ENGINE", "xelatex")
+	require.Equal(t, "xelatex", getPDFEngine())
+}
+
+func TestGetPDFTemplateDefault(t *testing.T) {
+	t.Setenv("PDF_TEMPLATE", "")
+	require.Equal(t, "/app/latex-templates/company-template.latex", getPDFTemplate())
+}
+
+func TestGetPDFTemplateOverride(t *testing.T) {
+	t.Setenv("PDF_TEMPLATE", "/app/custom/nxdoc.latex")
+	require.Equal(t, "/app/custom/nxdoc.latex", getPDFTemplate())
+}
