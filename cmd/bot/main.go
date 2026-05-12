@@ -47,32 +47,18 @@ func main() {
 		logger.Warn("ANTHROPIC_API_KEY environment variable not set - Claude Code will not work")
 	}
 
-	logger.Info("starting Diagnostic Slackbot",
+	logger.Info("starting Diagnostic Bot",
 		slog.String("investigation_dir", cfg.InvestigationDir))
 
-	// Create bot (will fail gracefully if Slack tokens missing)
-	diagnosticBot, err := bot.NewBot(cfg, logger)
-	if err != nil {
-		logger.Warn("failed to create bot, continuing anyway for testing", slog.String("error", err.Error()))
-
-		// Keep process alive for testing even if bot creation fails
-		logger.Info("bot will not connect to Slack but container remains running for debugging")
-
-		// Block forever with signal handling
-		sigChan := make(chan os.Signal, 1)
-		signal.Notify(sigChan, syscall.SIGINT, syscall.SIGTERM)
-		<-sigChan
-		logger.Info("received shutdown signal")
-		return
-	}
-
-	// Setup signal handling for graceful shutdown
+	// Setup context and signal handling
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	// Start metrics server with bot health checker
+	sigChan := make(chan os.Signal, 1)
+	signal.Notify(sigChan, syscall.SIGINT, syscall.SIGTERM)
+
+	// Start metrics server unconditionally — needed for liveness probes
 	metricsServer := metrics.NewServer(":9090", logger)
-	metricsServer.SetHealthChecker(diagnosticBot)
 
 	go func() {
 		metricsErr := metricsServer.Start(ctx)
@@ -81,11 +67,23 @@ func main() {
 		}
 	}()
 
-	// Start MCP HTTP server if enabled
+	// Start MCP HTTP server unconditionally if enabled — independent of Slack
 	startMCPHTTPServer(ctx, cfg.GitHubToken, logger)
 
-	sigChan := make(chan os.Signal, 1)
-	signal.Notify(sigChan, syscall.SIGINT, syscall.SIGTERM)
+	// Create bot — Slack is optional, MCP and metrics are not
+	diagnosticBot, err := bot.NewBot(cfg, logger)
+	if err != nil {
+		logger.Warn("failed to create bot, MCP and metrics servers still running",
+			slog.String("error", err.Error()))
+
+		// Block on signal — servers are already running
+		<-sigChan
+		logger.Info("received shutdown signal")
+		return
+	}
+
+	// Wire bot health checker now that bot exists
+	metricsServer.SetHealthChecker(diagnosticBot)
 
 	// Start bot in goroutine
 	errChan := make(chan error, 1)
