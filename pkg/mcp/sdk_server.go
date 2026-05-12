@@ -114,6 +114,7 @@ func (s *SDKServer) registerTools() {
 	s.registerGraphQLTools()
 	s.registerGitLabTools()
 	s.registerTempoTools()
+	s.registerAWSTools()
 	s.registerAPITools()
 
 	s.logger.Info("SDK server tools registered")
@@ -292,6 +293,32 @@ func (s *SDKServer) registerTempoTools() {
 	}
 
 	for _, t := range getTempoTools() {
+		if h, ok := handlers[t.Name]; ok {
+			s.registerTool(t.Name, t.Description, t.InputSchema, h)
+		}
+	}
+}
+
+func (s *SDKServer) registerAWSTools() {
+	if !awsCredentialsAvailable() {
+		return
+	}
+
+	handlers := map[string]func(context.Context, map[string]interface{}) (string, error){
+		toolSTSGetCallerIdentity:      s.legacy.executeSTSGetCallerIdentity,
+		toolIAMListRoles:              s.legacy.executeIAMListRoles,
+		toolIAMGetRole:                s.legacy.executeIAMGetRole,
+		toolEC2DescribeVPCs:           s.legacy.executeEC2DescribeVPCs,
+		toolEC2DescribeSubnets:        s.legacy.executeEC2DescribeSubnets,
+		toolEC2DescribeSecurityGroups: s.legacy.executeEC2DescribeSecurityGroups,
+		toolEC2DescribeNATGateways:    s.legacy.executeEC2DescribeNATGateways,
+		toolRoute53ListHostedZones:    s.legacy.executeRoute53ListHostedZones,
+		toolRoute53ListRecords:        s.legacy.executeRoute53ListRecords,
+		toolS3ListBuckets:             s.legacy.executeS3ListBuckets,
+		toolS3GetBucketPolicy:         s.legacy.executeS3GetBucketPolicy,
+	}
+
+	for _, t := range getAWSTools() {
 		if h, ok := handlers[t.Name]; ok {
 			s.registerTool(t.Name, t.Description, t.InputSchema, h)
 		}
