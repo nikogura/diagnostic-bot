@@ -558,8 +558,7 @@ func getPanelSchemaProperties() (result map[string]interface{}) {
 		},
 		"datasourceUID": map[string]interface{}{
 			"type":        "string",
-			"description": "UID of the specific datasource",
-			"default":     "postgres-main",
+			"description": "UID of the specific datasource (required — must match datasourceType; no default is applied)",
 		},
 		"description": map[string]interface{}{
 			"type":        "string",
@@ -1417,7 +1416,7 @@ func (s *Server) executeGrafanaGetDashboard(ctx context.Context, args map[string
 
 // parsePanelConfigs parses raw panel data into PanelQueryConfig structs.
 func (s *Server) parsePanelConfigs(panelsRaw []interface{}) (panels []PanelQueryConfig, err error) {
-	for _, panelRaw := range panelsRaw {
+	for i, panelRaw := range panelsRaw {
 		panelMap, panelOk := panelRaw.(map[string]interface{})
 		if !panelOk {
 			err = errors.New("each panel must be an object")
@@ -1425,6 +1424,10 @@ func (s *Server) parsePanelConfigs(panelsRaw []interface{}) (panels []PanelQuery
 		}
 
 		panel := s.parseSinglePanelConfig(panelMap)
+		if panel.DatasourceUID == "" {
+			err = fmt.Errorf("panel %d (%q): datasourceUID is required — specify the UID of the datasource that should run this panel's query", i, panel.Title)
+			return panels, err
+		}
 		panels = append(panels, panel)
 	}
 	return panels, err

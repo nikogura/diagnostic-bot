@@ -579,6 +579,20 @@ func TestGrafanaClientCreateDashboardFromQueries(t *testing.T) {
 		assert.Equal(t, "timeseries", cwPanel.Type)
 		assert.Equal(t, "EC2 CPU Utilization", cwPanel.Title)
 		assert.Equal(t, "cloudwatch-uid", cwPanel.Datasource["uid"])
+		if assert.NotEmpty(t, cwPanel.Targets, "cloudwatch panel must have a target") {
+			cwTarget := cwPanel.Targets[0]
+			assert.Equal(t, "AWS/EC2", cwTarget.Namespace)
+			assert.Equal(t, "CPUUtilization", cwTarget.MetricName)
+			assert.Equal(t, "us-east-1", cwTarget.Region)
+			assert.Equal(t, "Average", cwTarget.Statistic)
+			assert.Equal(t, "i-1234567890abcdef0", cwTarget.Dimensions["InstanceId"])
+			if assert.NotNil(t, cwTarget.MetricQueryType) {
+				assert.Equal(t, 0, *cwTarget.MetricQueryType)
+			}
+			if assert.NotNil(t, cwTarget.MetricEditorMode) {
+				assert.Equal(t, 0, *cwTarget.MetricEditorMode)
+			}
+		}
 
 		response := `{
 			"id": 789,
@@ -838,4 +852,56 @@ func TestCreateDashboardFromQueriesInfinity(t *testing.T) {
 	uid, err := client.CreateDashboardFromQueries(ctx, "Infinity Dashboard", queries, "")
 	require.NoError(t, err)
 	assert.Equal(t, "infinity-dash-uid", uid)
+}
+
+// TestBuildCloudWatchTargetSerialization verifies the marshaled JSON for a
+// CloudWatch panel target includes the query fields Grafana needs to render
+// the panel. Regression test for the bug where namespace, metricName,
+// dimensions, statistic, and region were silently dropped from the target.
+func TestBuildCloudWatchTargetSerialization(t *testing.T) {
+	logger := slog.New(slog.NewTextHandler(os.Stdout, nil))
+	client, err := NewGrafanaClient("http://grafana.example.com", "test-api-key", logger)
+	require.NoError(t, err)
+
+	queryConfig := PanelQueryConfig{
+		Title:          "ECS CPU",
+		PanelType:      "timeseries",
+		DatasourceType: "cloudwatch",
+		DatasourceUID:  "cloudwatch-prod",
+		Namespace:      "AWS/ECS",
+		MetricName:     "CPUUtilization",
+		Dimensions: map[string]string{
+			"ClusterName": "my-cluster",
+			"ServiceName": "my-service",
+		},
+		Statistics: []string{"Average"},
+		Region:     "us-east-1",
+	}
+
+	target := client.buildPanelTarget(queryConfig)
+
+	jsonBytes, err := json.Marshal(target)
+	require.NoError(t, err)
+
+	var raw map[string]interface{}
+	err = json.Unmarshal(jsonBytes, &raw)
+	require.NoError(t, err)
+
+	assert.Equal(t, "AWS/ECS", raw["namespace"], "namespace must be serialized into the target")
+	assert.Equal(t, "CPUUtilization", raw["metricName"], "metricName must be serialized into the target")
+	assert.Equal(t, "us-east-1", raw["region"], "region must be serialized into the target")
+	assert.Equal(t, "Average", raw["statistic"], "statistic (singular) must be serialized from Statistics[0]")
+
+	dims, ok := raw["dimensions"].(map[string]interface{})
+	require.True(t, ok, "dimensions must be serialized as a JSON object")
+	assert.Equal(t, "my-cluster", dims["ClusterName"])
+	assert.Equal(t, "my-service", dims["ServiceName"])
+
+	assert.EqualValues(t, 0, raw["metricQueryType"], "metricQueryType must be present (0 = Metric Search)")
+	assert.EqualValues(t, 0, raw["metricEditorMode"], "metricEditorMode must be present (0 = Builder)")
+
+	ds, ok := raw["datasource"].(map[string]interface{})
+	require.True(t, ok, "datasource block must be serialized")
+	assert.Equal(t, "cloudwatch", ds["type"])
+	assert.Equal(t, "cloudwatch-prod", ds["uid"])
 }

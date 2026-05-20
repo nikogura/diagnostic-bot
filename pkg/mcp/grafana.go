@@ -86,6 +86,15 @@ type Target struct {
 	RootSelector string              `json:"root_selector,omitempty"`
 	Columns      []InfinityColumn    `json:"columns,omitempty"`
 	Parser       string              `json:"parser,omitempty"`
+
+	// CloudWatch datasource fields
+	Namespace        string            `json:"namespace,omitempty"`
+	MetricName       string            `json:"metricName,omitempty"`
+	Region           string            `json:"region,omitempty"`
+	Statistic        string            `json:"statistic,omitempty"`
+	Dimensions       map[string]string `json:"dimensions,omitempty"`
+	MetricQueryType  *int              `json:"metricQueryType,omitempty"`
+	MetricEditorMode *int              `json:"metricEditorMode,omitempty"`
 }
 
 // InfinityURLOptions configures HTTP request options for Infinity datasource.
@@ -393,37 +402,31 @@ func (c *GrafanaClient) buildPanelTarget(queryConfig PanelQueryConfig) (target T
 }
 
 // buildCloudWatchTarget builds CloudWatch-specific target configuration.
+// Grafana's CloudWatch datasource expects query fields at the top level of
+// the target (namespace, metricName, dimensions, statistic, region) along
+// with the routing fields metricQueryType and metricEditorMode (both 0 =
+// Metric Search / Builder mode).
 func (c *GrafanaClient) buildCloudWatchTarget(target *Target, queryConfig PanelQueryConfig) {
-	target.Query = ""
+	target.Query = queryConfig.Query
 	target.Format = FormatTimeSeries
 
-	cwQuery := map[string]interface{}{
-		"region":     queryConfig.Region,
-		"namespace":  queryConfig.Namespace,
-		"metricName": queryConfig.MetricName,
-		"statistics": queryConfig.Statistics,
-		"dimensions": queryConfig.Dimensions,
-		"expression": queryConfig.Query,
+	target.Namespace = queryConfig.Namespace
+	target.MetricName = queryConfig.MetricName
+	target.Region = queryConfig.Region
+	target.Dimensions = queryConfig.Dimensions
+
+	// Grafana's CloudWatch target carries a single `statistic` per target.
+	// Multiple statistics require multiple targets; collapse to the first
+	// supplied value (callers needing N statistics should add N panels).
+	if len(queryConfig.Statistics) > 0 {
+		target.Statistic = queryConfig.Statistics[0]
 	}
 
-	// Clean empty values and set expression
-	for k, v := range cwQuery {
-		if v != nil {
-			switch val := v.(type) {
-			case string:
-				if val == "" {
-					continue
-				}
-				if k == "expression" {
-					target.Query = val
-				}
-			case []string:
-				if len(val) == 0 {
-					continue
-				}
-			}
-		}
-	}
+	// 0 = Metric Search, 0 = Builder mode. Must be present (not omitted) for
+	// Grafana to route the query correctly.
+	zero := 0
+	target.MetricQueryType = &zero
+	target.MetricEditorMode = &zero
 }
 
 // buildInfinityTarget builds Infinity datasource-specific target configuration.

@@ -560,6 +560,33 @@ func TestParseSinglePanelConfigInfinity(t *testing.T) {
 	require.Equal(t, "severity", panel.InfinityColumns[1].Selector)
 }
 
+// TestParsePanelConfigsRequiresDatasourceUID verifies that panels missing
+// an explicit datasourceUID are rejected. Previously the schema advertised
+// a "postgres-main" default that the parser never applied, so non-Postgres
+// panels silently shipped with datasource.uid="" — Grafana cannot route
+// queries without a UID.
+func TestParsePanelConfigsRequiresDatasourceUID(t *testing.T) {
+	t.Parallel()
+
+	logger := slog.New(slog.NewJSONHandler(os.Stderr, &slog.HandlerOptions{
+		Level: slog.LevelError,
+	}))
+	server := &Server{logger: logger}
+
+	panelsRaw := []interface{}{
+		map[string]interface{}{
+			"title":          "Prom Panel With No UID",
+			"panelType":      "timeseries",
+			"datasourceType": "prometheus",
+			"query":          "up",
+		},
+	}
+
+	_, err := server.parsePanelConfigs(panelsRaw)
+	require.Error(t, err, "panels without datasourceUID must be rejected")
+	require.Contains(t, err.Error(), "datasourceUID")
+}
+
 func TestValidatePDFEngine(t *testing.T) {
 	t.Parallel()
 
