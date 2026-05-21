@@ -199,6 +199,7 @@ func (s *SDKServer) registerGrafanaTools() {
 		toolGrafanaCreateDashboard: s.legacy.executeGrafanaCreateDashboard,
 		toolGrafanaUpdateDashboard: s.legacy.executeGrafanaUpdateDashboard,
 		toolGrafanaDeleteDashboard: s.legacy.executeGrafanaDeleteDashboard,
+		toolGrafanaCreateFolder:    s.legacy.executeGrafanaCreateFolder,
 	}
 
 	for _, t := range getGrafanaTools() {

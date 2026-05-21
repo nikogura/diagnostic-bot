@@ -905,3 +905,102 @@ func TestBuildCloudWatchTargetSerialization(t *testing.T) {
 	assert.Equal(t, "cloudwatch", ds["type"])
 	assert.Equal(t, "cloudwatch-prod", ds["uid"])
 }
+
+// TestGrafanaClientCreateFolder verifies CreateFolder posts to /api/folders
+// with the given title/uid/parentUid and returns the UID from the response.
+func TestGrafanaClientCreateFolder(t *testing.T) {
+	logger := slog.New(slog.NewTextHandler(os.Stdout, nil))
+	ctx := context.Background()
+
+	tests := []struct {
+		name          string
+		input         CreateFolderRequest
+		serverStatus  int
+		serverBody    string
+		expectErr     bool
+		expectedUID   string
+		expectedTitle string
+	}{
+		{
+			name: "create_top_level_folder",
+			input: CreateFolderRequest{
+				Title: "Operations",
+			},
+			serverStatus:  http.StatusOK,
+			serverBody:    `{"id": 12, "uid": "ops-uid", "title": "Operations", "url": "/dashboards/f/ops-uid/operations", "version": 1}`,
+			expectedUID:   "ops-uid",
+			expectedTitle: "Operations",
+		},
+		{
+			name: "create_nested_folder_with_uid",
+			input: CreateFolderRequest{
+				Title:     "Production",
+				UID:       "prod-uid",
+				ParentUID: "ops-uid",
+			},
+			serverStatus:  http.StatusOK,
+			serverBody:    `{"id": 13, "uid": "prod-uid", "title": "Production", "url": "/dashboards/f/prod-uid/production", "version": 1, "parentUid": "ops-uid"}`,
+			expectedUID:   "prod-uid",
+			expectedTitle: "Production",
+		},
+		{
+			name: "missing_title_rejected_client_side",
+			input: CreateFolderRequest{
+				Title: "",
+			},
+			expectErr: true,
+		},
+		{
+			name: "server_error_propagates",
+			input: CreateFolderRequest{
+				Title: "Operations",
+			},
+			serverStatus: http.StatusInternalServerError,
+			serverBody:   `{"message": "boom"}`,
+			expectErr:    true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				assert.Equal(t, "/api/folders", r.URL.Path)
+				assert.Equal(t, http.MethodPost, r.Method)
+				assert.Equal(t, "Bearer test-api-key", r.Header.Get("Authorization"))
+
+				var body map[string]interface{}
+				decodeErr := json.NewDecoder(r.Body).Decode(&body)
+				assert.NoError(t, decodeErr)
+				assert.Equal(t, tt.input.Title, body["title"])
+				if tt.input.UID != "" {
+					assert.Equal(t, tt.input.UID, body["uid"])
+				} else {
+					_, hasUID := body["uid"]
+					assert.False(t, hasUID, "uid should be omitted when not set")
+				}
+				if tt.input.ParentUID != "" {
+					assert.Equal(t, tt.input.ParentUID, body["parentUid"])
+				} else {
+					_, hasParent := body["parentUid"]
+					assert.False(t, hasParent, "parentUid should be omitted when not set")
+				}
+
+				w.WriteHeader(tt.serverStatus)
+				_, _ = w.Write([]byte(tt.serverBody))
+			}))
+			t.Cleanup(server.Close)
+
+			client, err := NewGrafanaClient(server.URL, "test-api-key", logger)
+			require.NoError(t, err)
+
+			folder, err := client.CreateFolder(ctx, tt.input)
+			if tt.expectErr {
+				require.Error(t, err)
+				return
+			}
+			require.NoError(t, err)
+			assert.Equal(t, tt.expectedUID, folder.UID)
+			assert.Equal(t, tt.expectedTitle, folder.Title)
+		})
+	}
+}

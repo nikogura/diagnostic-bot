@@ -587,6 +587,33 @@ func TestParsePanelConfigsRequiresDatasourceUID(t *testing.T) {
 	require.Contains(t, err.Error(), "datasourceUID")
 }
 
+// TestGetGrafanaToolsIncludesCreateFolder verifies the create folder tool is
+// registered alongside the other Grafana write tools.
+func TestGetGrafanaToolsIncludesCreateFolder(t *testing.T) {
+	t.Parallel()
+
+	tools := getGrafanaTools()
+
+	var createFolder *MCPTool
+	for i := range tools {
+		if tools[i].Name == toolGrafanaCreateFolder {
+			createFolder = &tools[i]
+			break
+		}
+	}
+	require.NotNil(t, createFolder, "grafana_create_folder tool must be registered")
+
+	props, ok := createFolder.InputSchema["properties"].(map[string]interface{})
+	require.True(t, ok, "create_folder schema must have properties")
+	require.Contains(t, props, "title")
+	require.Contains(t, props, "uid")
+	require.Contains(t, props, "parentUid")
+
+	required, ok := createFolder.InputSchema["required"].([]string)
+	require.True(t, ok, "create_folder schema must declare required fields as []string")
+	require.Contains(t, required, "title")
+}
+
 func TestValidatePDFEngine(t *testing.T) {
 	t.Parallel()
 

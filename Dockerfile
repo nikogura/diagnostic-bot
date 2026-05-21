@@ -2,8 +2,13 @@
 # Go cross-compiles natively via GOOS/GOARCH — no QEMU needed.
 FROM --platform=$BUILDPLATFORM golang:1.24-alpine AS builder
 
-ARG TARGETOS=linux
-ARG TARGETARCH=amd64
+# TARGETOS / TARGETARCH are supplied automatically by `docker buildx build`
+# when invoked with --platform. We deliberately declare them WITHOUT defaults
+# so a bare `docker build` (no buildx, no --platform) fails loudly instead of
+# silently producing a wrong-arch binary that still ships inside a per-arch
+# manifest tag. See issue #15 (v0.0.42 arm64 manifest carried an amd64 ELF).
+ARG TARGETOS
+ARG TARGETARCH
 
 # Install build dependencies
 RUN apk add --no-cache git make

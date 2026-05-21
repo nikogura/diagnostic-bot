@@ -347,6 +347,55 @@ func (c *GrafanaClient) UpdateDashboard(ctx context.Context, dashboard *Dashboar
 	return err
 }
 
+// CreateFolderRequest is the input for CreateFolder. Title is required.
+// UID and ParentUID are optional — Grafana auto-generates UID when omitted
+// and treats an absent ParentUID as a top-level (General) folder.
+type CreateFolderRequest struct {
+	Title     string `json:"title"`
+	UID       string `json:"uid,omitempty"`
+	ParentUID string `json:"parentUid,omitempty"`
+}
+
+// Folder represents a Grafana folder (directory) as returned by /api/folders.
+type Folder struct {
+	ID        int    `json:"id"`
+	UID       string `json:"uid"`
+	Title     string `json:"title"`
+	URL       string `json:"url"`
+	Version   int    `json:"version"`
+	ParentUID string `json:"parentUid,omitempty"`
+}
+
+// CreateFolder creates a new folder (directory) via POST /api/folders. A
+// folder is Grafana's equivalent of a directory — dashboards reference it
+// by FolderUID. Pass ParentUID to nest under another folder.
+func (c *GrafanaClient) CreateFolder(ctx context.Context, req CreateFolderRequest) (folder Folder, err error) {
+	if req.Title == "" {
+		err = errors.New("folder title is required")
+		return folder, err
+	}
+
+	var responseBody []byte
+	responseBody, err = c.makeRequest(ctx, http.MethodPost, "/api/folders", req)
+	if err != nil {
+		err = fmt.Errorf("creating folder: %w", err)
+		return folder, err
+	}
+
+	err = json.Unmarshal(responseBody, &folder)
+	if err != nil {
+		err = fmt.Errorf("unmarshaling folder response: %w", err)
+		return folder, err
+	}
+
+	c.logger.InfoContext(ctx, "created folder",
+		"uid", folder.UID,
+		"title", folder.Title,
+		"parentUid", folder.ParentUID,
+	)
+	return folder, err
+}
+
 // DeleteDashboard deletes a dashboard by UID.
 func (c *GrafanaClient) DeleteDashboard(ctx context.Context, uid string) (err error) {
 	endpoint := fmt.Sprintf("/api/dashboards/uid/%s", uid)

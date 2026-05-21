@@ -48,6 +48,7 @@ const (
 	toolGrafanaCreateDashboard = "grafana_create_dashboard"
 	toolGrafanaUpdateDashboard = "grafana_update_dashboard"
 	toolGrafanaDeleteDashboard = "grafana_delete_dashboard"
+	toolGrafanaCreateFolder    = "grafana_create_folder"
 	// CloudWatch Logs tools are defined in cloudwatch.go.
 	// Prometheus tools are defined in prometheus.go.
 )
@@ -731,6 +732,28 @@ func getGrafanaModifyTools() (result []MCPTool) {
 				"required": []string{"uid"},
 			},
 		},
+		{
+			Name:        toolGrafanaCreateFolder,
+			Description: "Create a Grafana folder (directory) used to group dashboards. Returns the new folder's UID, which dashboards reference via folderUid.",
+			InputSchema: map[string]interface{}{
+				"type": "object",
+				"properties": map[string]interface{}{
+					"title": map[string]interface{}{
+						"type":        "string",
+						"description": "Folder display name (required)",
+					},
+					"uid": map[string]interface{}{
+						"type":        "string",
+						"description": "Optional folder UID. If omitted, Grafana auto-generates one.",
+					},
+					"parentUid": map[string]interface{}{
+						"type":        "string",
+						"description": "Optional parent folder UID for nested folders. Omit to create at the top level.",
+					},
+				},
+				"required": []string{"title"},
+			},
+		},
 	}
 
 	return result
@@ -859,6 +882,8 @@ func (s *Server) dispatchToolCall(ctx context.Context, toolName string, args map
 		result, err = s.executeGrafanaUpdateDashboard(ctx, args)
 	case toolGrafanaDeleteDashboard:
 		result, err = s.executeGrafanaDeleteDashboard(ctx, args)
+	case toolGrafanaCreateFolder:
+		result, err = s.executeGrafanaCreateFolder(ctx, args)
 	default:
 		result, err = s.dispatchExtendedToolCall(ctx, toolName, args)
 	}
@@ -1613,6 +1638,39 @@ func (s *Server) executeGrafanaUpdateDashboard(ctx context.Context, args map[str
 	}
 
 	result = fmt.Sprintf("Successfully updated dashboard with UID: %s", uid)
+	return result, err
+}
+
+// executeGrafanaCreateFolder creates a Grafana folder (directory).
+func (s *Server) executeGrafanaCreateFolder(ctx context.Context, args map[string]interface{}) (result string, err error) {
+	if s.grafanaClient == nil {
+		err = errors.New("grafana access not configured (GRAFANA_URL or GRAFANA_API_KEY not set)")
+		return result, err
+	}
+
+	title, _ := args["title"].(string)
+	if title == "" {
+		err = errors.New("title parameter is required")
+		return result, err
+	}
+
+	uid, _ := args["uid"].(string)
+	parentUID, _ := args["parentUid"].(string)
+
+	var folder Folder
+	folder, err = s.grafanaClient.CreateFolder(ctx, CreateFolderRequest{
+		Title:     title,
+		UID:       uid,
+		ParentUID: parentUID,
+	})
+	if err != nil {
+		return result, err
+	}
+
+	result = fmt.Sprintf("Successfully created folder '%s' with UID: %s", folder.Title, folder.UID)
+	if folder.ParentUID != "" {
+		result = fmt.Sprintf("%s (nested under parent UID: %s)", result, folder.ParentUID)
+	}
 	return result, err
 }
 
