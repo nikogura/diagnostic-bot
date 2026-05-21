@@ -4,6 +4,7 @@ import (
 	"context"
 	"log/slog"
 	"os"
+	"strings"
 
 	"github.com/nikogura/diagnostic-bot/pkg/apiconfig"
 	"github.com/nikogura/diagnostic-bot/pkg/k8s"
@@ -29,6 +30,7 @@ func main() {
 
 	// Initialize clients
 	lokiClient := k8s.NewLokiClient(lokiEndpoint, logger)
+	configureLokiTenants(lokiClient, logger)
 
 	// Load third-party API configs
 	apiToolRegistry := buildAPIToolRegistry(logger)
@@ -73,4 +75,36 @@ func buildAPIToolRegistry(logger *slog.Logger) (registry *apiconfig.APIToolRegis
 		slog.Int("api_count", len(configs)))
 
 	return registry
+}
+
+// configureLokiTenants reads LOKI_DEFAULT_ORG_ID and LOKI_ORG_IDS and applies
+// them to the supplied client. Both empty preserves the auth_enabled:false
+// behavior (no X-Scope-OrgID sent). Misconfiguration is fatal.
+func configureLokiTenants(client *k8s.LokiClient, logger *slog.Logger) {
+	defaultTenant := os.Getenv("LOKI_DEFAULT_ORG_ID")
+	orgIDsCSV := os.Getenv("LOKI_ORG_IDS")
+
+	var allowedTenants []string
+	if orgIDsCSV != "" {
+		for _, t := range strings.Split(orgIDsCSV, ",") {
+			t = strings.TrimSpace(t)
+			if t != "" {
+				allowedTenants = append(allowedTenants, t)
+			}
+		}
+	}
+
+	if defaultTenant == "" && len(allowedTenants) == 0 {
+		return
+	}
+
+	err := client.ConfigureTenants(defaultTenant, allowedTenants)
+	if err != nil {
+		logger.Error("invalid Loki tenant configuration", slog.String("error", err.Error()))
+		os.Exit(1)
+	}
+
+	logger.Info("Loki multi-tenant mode enabled",
+		slog.String("default_tenant", defaultTenant),
+		slog.Any("allowed_tenants", allowedTenants))
 }

@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 	"time"
 
@@ -122,6 +123,40 @@ func getEnv(key string, defaultValue string) (result string) {
 	return result
 }
 
+// configureLokiTenants reads LOKI_DEFAULT_ORG_ID and LOKI_ORG_IDS and applies
+// them to the supplied client. Both empty preserves the auth_enabled:false
+// behavior (no X-Scope-OrgID sent). Misconfiguration is fatal — silently
+// running with a half-applied tenant config would be worse than failing
+// at startup.
+func configureLokiTenants(ctx context.Context, client *k8s.LokiClient, logger *slog.Logger) {
+	defaultTenant := getEnv("LOKI_DEFAULT_ORG_ID", "")
+	orgIDsCSV := getEnv("LOKI_ORG_IDS", "")
+
+	var allowedTenants []string
+	if orgIDsCSV != "" {
+		for _, t := range strings.Split(orgIDsCSV, ",") {
+			t = strings.TrimSpace(t)
+			if t != "" {
+				allowedTenants = append(allowedTenants, t)
+			}
+		}
+	}
+
+	if defaultTenant == "" && len(allowedTenants) == 0 {
+		return
+	}
+
+	err := client.ConfigureTenants(defaultTenant, allowedTenants)
+	if err != nil {
+		logger.ErrorContext(ctx, "invalid Loki tenant configuration", slog.String("error", err.Error()))
+		os.Exit(1)
+	}
+
+	logger.InfoContext(ctx, "Loki multi-tenant mode enabled",
+		slog.String("default_tenant", defaultTenant),
+		slog.Any("allowed_tenants", allowedTenants))
+}
+
 // parseFileRetention parses the FILE_RETENTION environment variable.
 // Returns 0 if not set or invalid (which triggers use of DefaultFileRetention).
 func parseFileRetention(logger *slog.Logger) (result time.Duration) {
@@ -173,6 +208,7 @@ func startMCPHTTPServer(ctx context.Context, githubToken string, logger *slog.Lo
 	}
 
 	lokiClient := k8s.NewLokiClient(lokiEndpoint, logger)
+	configureLokiTenants(ctx, lokiClient, logger)
 	legacyServer := mcp.NewServer(lokiClient, githubToken, nil, logger)
 	sdkServer := mcp.NewSDKServer(legacyServer)
 

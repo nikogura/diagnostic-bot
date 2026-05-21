@@ -3,11 +3,13 @@ package k8s
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
 	"net/url"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -21,16 +23,25 @@ const (
 
 	// MaxLokiResults is the maximum number of results to return from Loki.
 	MaxLokiResults = 1000
+
+	// LokiTenantHeader is the multi-tenant identifier header Loki expects
+	// when auth_enabled: true. The value is Go's canonicalized form of
+	// "X-Scope-OrgID" — Loki treats it case-insensitively per HTTP spec.
+	LokiTenantHeader = "X-Scope-Orgid"
 )
 
 // LokiClient handles queries to the Loki log aggregation system.
 type LokiClient struct {
-	endpoint   string
-	httpClient *http.Client
-	logger     *slog.Logger
+	endpoint       string
+	httpClient     *http.Client
+	logger         *slog.Logger
+	defaultTenant  string
+	allowedTenants map[string]struct{}
 }
 
-// NewLokiClient creates a new Loki client.
+// NewLokiClient creates a new Loki client. Multi-tenant Loki deployments
+// (auth_enabled: true) additionally require calling ConfigureTenants before
+// issuing queries.
 func NewLokiClient(endpoint string, logger *slog.Logger) (result *LokiClient) {
 	if endpoint == "" {
 		endpoint = DefaultLokiEndpoint
@@ -41,18 +52,100 @@ func NewLokiClient(endpoint string, logger *slog.Logger) (result *LokiClient) {
 		httpClient: &http.Client{
 			Timeout: 30 * time.Second,
 		},
-		logger: logger,
+		logger:         logger,
+		allowedTenants: map[string]struct{}{},
 	}
 
 	return result
 }
 
+// ConfigureTenants enables multi-tenant Loki support by attaching tenant
+// configuration after construction. defaultTenant is used as the
+// X-Scope-OrgID value when a query doesn't specify one (empty means the
+// caller must specify per-query). allowedTenants restricts which tenant
+// identifiers may be sent — empty means no restriction.
+//
+// The allowlist is not a security boundary against Loki — Loki trusts
+// whatever X-Scope-OrgID it receives. It exists to keep the calling LLM
+// from hallucinating tenant names. When the allowlist is non-empty, the
+// default tenant must be on it.
+func (l *LokiClient) ConfigureTenants(defaultTenant string, allowedTenants []string) (err error) {
+	allowSet := make(map[string]struct{}, len(allowedTenants))
+	for _, t := range allowedTenants {
+		t = strings.TrimSpace(t)
+		if t == "" {
+			continue
+		}
+		allowSet[t] = struct{}{}
+	}
+
+	if defaultTenant != "" && len(allowSet) > 0 {
+		_, ok := allowSet[defaultTenant]
+		if !ok {
+			err = fmt.Errorf("default tenant %q is not in the allowlist %v", defaultTenant, allowedTenants)
+			return err
+		}
+	}
+
+	l.defaultTenant = defaultTenant
+	l.allowedTenants = allowSet
+	return err
+}
+
+// AllowedTenants returns the configured tenant allowlist in sorted order.
+// The MCP layer injects this list into the query_loki tool description so
+// the calling LLM can discover which tenants are queryable.
+func (l *LokiClient) AllowedTenants() (result []string) {
+	result = make([]string, 0, len(l.allowedTenants))
+	for t := range l.allowedTenants {
+		result = append(result, t)
+	}
+	sort.Strings(result)
+	return result
+}
+
+// resolveTenant returns the X-Scope-OrgID value to send for a given
+// QueryRequest, after applying the default and validating against the
+// allowlist. Empty return with nil err means no header should be sent
+// (the auth_enabled:false backwards-compatible path).
+func (l *LokiClient) resolveTenant(req QueryRequest) (tenant string, err error) {
+	tenant = strings.TrimSpace(req.Tenant)
+	if tenant == "" {
+		tenant = l.defaultTenant
+	}
+
+	if tenant == "" {
+		if len(l.allowedTenants) > 0 {
+			err = errors.New("loki tenant allowlist is configured but no tenant was specified — set a default via LOKI_DEFAULT_ORG_ID or pass tenant explicitly")
+			return tenant, err
+		}
+		return tenant, err
+	}
+
+	if len(l.allowedTenants) == 0 {
+		return tenant, err
+	}
+
+	// Loki accepts pipe-delimited tenants on read paths (query_range, labels,
+	// series). Validate every segment against the allowlist.
+	for _, segment := range strings.Split(tenant, "|") {
+		segment = strings.TrimSpace(segment)
+		_, ok := l.allowedTenants[segment]
+		if !ok {
+			err = fmt.Errorf("tenant %q is not in the loki allowlist", segment)
+			return tenant, err
+		}
+	}
+	return tenant, err
+}
+
 // QueryRequest represents a query request to Loki.
 type QueryRequest struct {
-	Query string
-	Start string // RFC3339 format or relative duration (e.g., "1h", "24h")
-	End   string // RFC3339 format or "now"
-	Limit int
+	Query  string
+	Start  string // RFC3339 format or relative duration (e.g., "1h", "24h")
+	End    string // RFC3339 format or "now"
+	Limit  int
+	Tenant string // X-Scope-OrgID value. Empty means use the client's default.
 }
 
 // QueryResult represents the result from a Loki query.
@@ -130,11 +223,25 @@ func (l *LokiClient) Query(ctx context.Context, req QueryRequest) (result QueryR
 
 	fullURL := fmt.Sprintf("%s?%s", queryURL, params.Encode())
 
+	// Resolve and validate the Loki tenant (X-Scope-OrgID) before issuing
+	// the request. Multi-tenant deployments (auth_enabled: true) refuse
+	// queries without a tenant header — the allowlist check runs first so
+	// invalid tenants never hit the wire.
+	var tenant string
+	tenant, err = l.resolveTenant(req)
+	if err != nil {
+		return result, err
+	}
+
 	// Execute HTTP request
 	httpReq, err = http.NewRequestWithContext(ctx, http.MethodGet, fullURL, nil)
 	if err != nil {
 		err = fmt.Errorf("creating HTTP request: %w", err)
 		return result, err
+	}
+
+	if tenant != "" {
+		httpReq.Header.Set(LokiTenantHeader, tenant)
 	}
 
 	resp, err = l.httpClient.Do(httpReq)

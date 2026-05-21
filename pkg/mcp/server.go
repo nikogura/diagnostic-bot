@@ -254,33 +254,48 @@ func (s *Server) handleInitialize(_ context.Context, req MCPRequest) {
 	fmt.Println(string(data))
 }
 
-// getLokiTools returns Loki-related tool definitions.
-func getLokiTools() (result []MCPTool) {
+// getLokiTools returns Loki-related tool definitions. When allowedTenants
+// is non-empty (multi-tenant Loki, auth_enabled: true), the list is
+// appended to the tool description so the calling LLM can discover which
+// tenants are queryable, and the schema gains an optional tenant arg.
+func getLokiTools(allowedTenants []string) (result []MCPTool) {
+	description := "Query Loki log aggregation system for ModSecurity WAF logs. Returns JSON log entries with transaction details, blocked IPs, rule IDs, etc."
+
+	properties := map[string]interface{}{
+		"query": map[string]interface{}{
+			"type":        "string",
+			"description": "LogQL query string. Example: '{realm=\"prod\", namespace=\"ingress-nginx\"} |~ \"ModSecurity\" | json | transaction_response_http_code=\"403\"'",
+		},
+		"start": map[string]interface{}{
+			"type":        "string",
+			"description": "Start time as relative duration (e.g., '1h', '24h') or RFC3339 timestamp",
+		},
+		"end": map[string]interface{}{
+			"type":        "string",
+			"description": descEndTime,
+		},
+		"limit": map[string]interface{}{
+			"type":        "integer",
+			"description": "Maximum number of log entries to return (default: 100, recommended max: 500 to avoid token limits)",
+		},
+	}
+
+	if len(allowedTenants) > 0 {
+		description = fmt.Sprintf("%s Allowed tenants: %s.", description, strings.Join(allowedTenants, ", "))
+		properties["tenant"] = map[string]interface{}{
+			"type":        "string",
+			"description": "Loki tenant (X-Scope-OrgID) for this query. Pipe-delimited values request a multi-tenant read (e.g. 'monitoring|cloudtrail'). Omit to use the server's default tenant. Allowed values: " + strings.Join(allowedTenants, ", ") + ".",
+		}
+	}
+
 	result = []MCPTool{
 		{
 			Name:        toolQueryLoki,
-			Description: "Query Loki log aggregation system for ModSecurity WAF logs. Returns JSON log entries with transaction details, blocked IPs, rule IDs, etc.",
+			Description: description,
 			InputSchema: map[string]interface{}{
-				"type": "object",
-				"properties": map[string]interface{}{
-					"query": map[string]interface{}{
-						"type":        "string",
-						"description": "LogQL query string. Example: '{realm=\"prod\", namespace=\"ingress-nginx\"} |~ \"ModSecurity\" | json | transaction_response_http_code=\"403\"'",
-					},
-					"start": map[string]interface{}{
-						"type":        "string",
-						"description": "Start time as relative duration (e.g., '1h', '24h') or RFC3339 timestamp",
-					},
-					"end": map[string]interface{}{
-						"type":        "string",
-						"description": descEndTime,
-					},
-					"limit": map[string]interface{}{
-						"type":        "integer",
-						"description": "Maximum number of log entries to return (default: 100, recommended max: 500 to avoid token limits)",
-					},
-				},
-				"required": []string{"query", "start"},
+				"type":       "object",
+				"properties": properties,
+				"required":   []string{"query", "start"},
 			},
 		},
 	}
@@ -763,7 +778,7 @@ func getGrafanaModifyTools() (result []MCPTool) {
 // based on which backing services are configured.
 func (s *Server) getToolDefinitions() (result []MCPTool) {
 	if s.lokiClient != nil {
-		result = append(result, getLokiTools()...)
+		result = append(result, getLokiTools(s.lokiClient.AllowedTenants())...)
 	}
 
 	// Utility tools (whois, PDF) are always available
@@ -966,11 +981,14 @@ func (s *Server) executeQueryLoki(ctx context.Context, args map[string]interface
 		limit = 500
 	}
 
+	tenant, _ := args["tenant"].(string)
+
 	queryResult, err = s.lokiClient.Query(ctx, k8s.QueryRequest{
-		Query: query,
-		Start: start,
-		End:   end,
-		Limit: limit,
+		Query:  query,
+		Start:  start,
+		End:    end,
+		Limit:  limit,
+		Tenant: tenant,
 	})
 	if err != nil {
 		return result, err

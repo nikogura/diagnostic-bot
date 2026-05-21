@@ -3,6 +3,8 @@ package mcp
 import (
 	"context"
 	"log/slog"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"strings"
 	"testing"
@@ -45,7 +47,7 @@ func TestGetGitHubTools(t *testing.T) {
 func TestGetLokiTools(t *testing.T) {
 	t.Parallel()
 
-	tools := getLokiTools()
+	tools := getLokiTools(nil)
 
 	// Should have 1 Loki tool
 	if len(tools) != 1 {
@@ -55,6 +57,72 @@ func TestGetLokiTools(t *testing.T) {
 	if tools[0].Name != "query_loki" {
 		t.Errorf("getLokiTools() tool name = %s, want query_loki", tools[0].Name)
 	}
+}
+
+// TestGetLokiToolsExposesTenantArgWhenAllowlistSet verifies the query_loki
+// schema gains a tenant field and the tool description advertises the
+// allowed tenants so the calling LLM can discover valid values without
+// guessing.
+func TestGetLokiToolsExposesTenantArgWhenAllowlistSet(t *testing.T) {
+	t.Parallel()
+
+	tools := getLokiTools([]string{"monitoring", "cloudtrail", "self-monitoring"})
+	require.Len(t, tools, 1)
+
+	require.Contains(t, tools[0].Description, "monitoring")
+	require.Contains(t, tools[0].Description, "cloudtrail")
+	require.Contains(t, tools[0].Description, "self-monitoring")
+
+	props, ok := tools[0].InputSchema["properties"].(map[string]interface{})
+	require.True(t, ok, "schema must have properties")
+	require.Contains(t, props, "tenant", "tenant arg must appear in schema")
+
+	// tenant must NOT be in the required list — it's optional and defaults
+	// to the server-configured default tenant when omitted.
+	required, _ := tools[0].InputSchema["required"].([]string)
+	require.NotContains(t, required, "tenant")
+}
+
+// TestGetLokiToolsOmitsTenantDescriptionWhenNoAllowlist verifies that
+// single-tenant deployments (no allowlist) don't get a noisy "Allowed
+// tenants:" footer in the tool description.
+func TestGetLokiToolsOmitsTenantDescriptionWhenNoAllowlist(t *testing.T) {
+	t.Parallel()
+
+	tools := getLokiTools(nil)
+	require.Len(t, tools, 1)
+	require.NotContains(t, tools[0].Description, "Allowed tenants")
+}
+
+// TestExecuteQueryLokiPassesTenantToBackend verifies the executor reads the
+// tenant arg from the MCP call and forwards it to the LokiClient, which in
+// turn sets X-Scope-OrgID on the outgoing request.
+func TestExecuteQueryLokiPassesTenantToBackend(t *testing.T) {
+	t.Parallel()
+
+	var capturedTenant string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		capturedTenant = r.Header.Get(k8s.LokiTenantHeader)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"status":"success","data":{"resultType":"streams","result":[],"stats":{}}}`))
+	}))
+	t.Cleanup(server.Close)
+
+	logger := slog.New(slog.NewJSONHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError}))
+	lokiClient := k8s.NewLokiClient(server.URL, logger)
+	configErr := lokiClient.ConfigureTenants("monitoring", []string{"monitoring", "cloudtrail"})
+	require.NoError(t, configErr)
+
+	mcpServer := NewServer(lokiClient, "", nil, logger)
+
+	args := map[string]interface{}{
+		"query":  `{job="test"}`,
+		"start":  "1h",
+		"tenant": "cloudtrail",
+	}
+	_, err := mcpServer.executeQueryLoki(t.Context(), args)
+	require.NoError(t, err)
+	require.Equal(t, "cloudtrail", capturedTenant)
 }
 
 func TestGetUtilityTools(t *testing.T) {
