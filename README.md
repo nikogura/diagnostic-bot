@@ -222,11 +222,12 @@ Your investigation prompt should reference these MCP tool names that Claude can 
 
 > **CRITICAL: Investigation skills MUST reference MCP tool names (e.g., `cloudwatch_logs_query`), NOT external CLI commands (e.g., `aws logs start-query`).** Claude Code runs in `--print` mode with MCP tools via stdio — it does NOT have shell access to external CLIs. If a skill references CLI commands instead of MCP tool names, Claude will either fail or hallucinate results.
 
-**Logging (Loki)** — requires `LOKI_ENDPOINT`:
+**Logging (Loki)** — requires `LOKI_ENDPOINT`. For multi-tenant deployments (`auth_enabled: true`) additionally set `LOKI_DEFAULT_ORG_ID` and optionally `LOKI_ORG_IDS`:
 - `query_loki` — Query Loki for cluster logs using LogQL syntax
   ```
-  Parameters: query, start, end (optional), limit (optional)
+  Parameters: query, start, end (optional), limit (optional), tenant (optional, multi-tenant only)
   ```
+  The `tenant` parameter accepts a single tenant (`monitoring`) or Loki's pipe-delimited multi-tenant read syntax (`monitoring|cloudtrail`). When `LOKI_ORG_IDS` is set, every tenant in the value must appear in the allowlist or the request is rejected before any HTTP call. When `tenant` is omitted, `LOKI_DEFAULT_ORG_ID` is used.
 
 **CloudWatch Logs** — requires `CLOUDWATCH_ACCOUNTS` or `CLOUDWATCH_ASSUME_ROLE`:
 - `cloudwatch_logs_query` — Execute CloudWatch Logs Insights queries across log groups
@@ -463,7 +464,7 @@ The bot uses Claude Code CLI with a custom MCP (Model Context Protocol) server t
 
 | Category | Env Var Required | Tools |
 |----------|-----------------|-------|
-| Loki (Logging) | `LOKI_ENDPOINT` | `query_loki` |
+| Loki (Logging) | `LOKI_ENDPOINT` (multi-tenant: `LOKI_DEFAULT_ORG_ID`, optional `LOKI_ORG_IDS`) | `query_loki` |
 | CloudWatch Logs | `CLOUDWATCH_ACCOUNTS` or `CLOUDWATCH_ASSUME_ROLE` | `cloudwatch_logs_query`, `cloudwatch_logs_list_groups`, `cloudwatch_logs_get_events` |
 | Prometheus | `PROMETHEUS_URL` or `PROMETHEUS_<NAME>_URL` | `prometheus_query`, `prometheus_query_range`, `prometheus_series`, `prometheus_label_values`, `prometheus_list_endpoints` |
 | Grafana | `GRAFANA_URL` + `GRAFANA_API_KEY` | `grafana_list_dashboards`, `grafana_get_dashboard`, `grafana_create_dashboard`, `grafana_update_dashboard`, `grafana_delete_dashboard` |
@@ -563,6 +564,8 @@ The bot is configured via environment variables:
 
 **Tool Backing Services** (each enables a set of MCP tools — see [Tool Categories](#tool-categories)):
 - `LOKI_ENDPOINT` - Loki gateway endpoint (enables `query_loki`)
+- `LOKI_DEFAULT_ORG_ID` - Loki tenant (X-Scope-OrgID) sent when a query doesn't specify one. Required for Loki deployments configured with `auth_enabled: true`. Leave unset for single-tenant `auth_enabled: false` deployments — the wire format is unchanged and Loki serves the synthetic `fake` tenant.
+- `LOKI_ORG_IDS` - Comma-separated allowlist of tenants the bot may send (e.g. `monitoring,cloudtrail,self-monitoring`). Not a security boundary — Loki trusts whatever `X-Scope-OrgID` header it receives; this list keeps the LLM from inventing tenant names. When set, `LOKI_DEFAULT_ORG_ID` must be one of the listed values or the bot exits at startup. The allowlist is also appended to the `query_loki` tool description so the LLM can discover valid values.
 - `CLOUDWATCH_ACCOUNTS` - JSON map of friendly name to full IAM role ARN for multi-account CloudWatch access (enables CloudWatch tools). Example: `{"dev":"arn:aws:iam::111:role/dev-reader","prod":"arn:aws:iam::222:role/prod-reader"}`
 - `CLOUDWATCH_ASSUME_ROLE` - IAM role ARN to assume for single-account CloudWatch queries (legacy, enables CloudWatch tools). Use `CLOUDWATCH_ACCOUNTS` for multi-account support.
 - `CLOUDWATCH_EXTERNAL_ID` - External ID for cross-account role assumption (optional, used with both `CLOUDWATCH_ACCOUNTS` and `CLOUDWATCH_ASSUME_ROLE`)
