@@ -543,7 +543,10 @@ func (c *GrafanaClient) buildInfinityTarget(target *Target, queryConfig PanelQue
 
 // CreateDashboardFromQueries creates a dashboard with panels based on any type of queries.
 // Supports SQL (PostgreSQL/MySQL), Prometheus (PromQL), CloudWatch, and Infinity queries.
-func (c *GrafanaClient) CreateDashboardFromQueries(ctx context.Context, title string, queries []PanelQueryConfig, folderUID string) (uid string, err error) {
+// message is the Grafana version-history note; callers should pre-compose it
+// with the audit user (see pkg/mcp audit.go) so attribution lands in the
+// Versions tab.
+func (c *GrafanaClient) CreateDashboardFromQueries(ctx context.Context, title string, queries []PanelQueryConfig, folderUID, message string) (uid string, err error) {
 	dashboard := &Dashboard{
 		Title:    title,
 		Tags:     []string{"auto-generated", "mcp"},
@@ -591,7 +594,7 @@ func (c *GrafanaClient) CreateDashboardFromQueries(ctx context.Context, title st
 		dashboard.Panels = append(dashboard.Panels, panel)
 	}
 
-	uid, err = c.CreateDashboard(ctx, dashboard, folderUID, fmt.Sprintf("Auto-generated dashboard: %s", title))
+	uid, err = c.CreateDashboard(ctx, dashboard, folderUID, message)
 	return uid, err
 }
 

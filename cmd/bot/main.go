@@ -214,8 +214,13 @@ func startMCPHTTPServer(ctx context.Context, githubToken string, logger *slog.Lo
 
 	go func() {
 		mux := http.NewServeMux()
-		mux.Handle("/mcp", sdkServer.StreamableHTTPHandler())
-		mux.Handle("/sse", sdkServer.SSEHandler())
+		// Wrap with audit-source middleware so every Grafana write logged
+		// downstream carries the originating client IP (X-Forwarded-For
+		// first hop, falling back to RemoteAddr). Port-forwarded admin
+		// traffic surfaces as 127.0.0.1; direct connections expose the
+		// real caller.
+		mux.Handle("/mcp", mcp.WithAuditSourceMiddleware(sdkServer.StreamableHTTPHandler()))
+		mux.Handle("/sse", mcp.WithAuditSourceMiddleware(sdkServer.SSEHandler()))
 
 		logger.InfoContext(ctx, "starting MCP HTTP server",
 			slog.String("addr", mcpHTTPAddr),

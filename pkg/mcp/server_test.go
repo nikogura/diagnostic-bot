@@ -1,7 +1,9 @@
 package mcp
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
@@ -765,4 +767,268 @@ func TestGetPDFTemplateDefault(t *testing.T) {
 func TestGetPDFTemplateOverride(t *testing.T) {
 	t.Setenv("PDF_TEMPLATE", "/app/custom/nxdoc.latex")
 	require.Equal(t, "/app/custom/nxdoc.latex", getPDFTemplate())
+}
+
+// TestResolveAuditUserHonorsEnvVar verifies MCP_AUDIT_USER overrides the OS user.
+// This is the explicit-override path — used in containers, CI, or any deployment
+// where the process owner isn't the right identity to stamp on Grafana writes.
+func TestResolveAuditUserHonorsEnvVar(t *testing.T) {
+	logger := slog.New(slog.NewJSONHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError}))
+	t.Setenv("MCP_AUDIT_USER", "alice@example.com")
+	require.Equal(t, "alice@example.com", resolveAuditUser(logger))
+}
+
+// TestResolveAuditUserFallsBackToOSUser verifies that with no env override
+// the local OS user is used. For Claude Code running the MCP server over
+// stdio, that resolves to the developer's username automatically.
+func TestResolveAuditUserFallsBackToOSUser(t *testing.T) {
+	logger := slog.New(slog.NewJSONHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError}))
+	t.Setenv("MCP_AUDIT_USER", "")
+	got := resolveAuditUser(logger)
+	require.NotEmpty(t, got)
+	require.NotEqual(t, "mcp-server", got, "must resolve to actual OS user, not the fallback")
+}
+
+// TestComposeVersionNoteWithIntention verifies the Grafana version-history
+// string is "<user>: <intention>" so audit trails surface both who and why.
+func TestComposeVersionNoteWithIntention(t *testing.T) {
+	require.Equal(t, "alice: adding ECS dashboard", composeVersionNote("alice", "adding ECS dashboard", "fallback"))
+}
+
+// TestComposeVersionNoteFallsBackToDefaultIntention verifies that when the
+// LLM omits a message, a tool-specific default still names the user.
+func TestComposeVersionNoteFallsBackToDefaultIntention(t *testing.T) {
+	require.Equal(t, "alice: created via mcp", composeVersionNote("alice", "", "created via mcp"))
+}
+
+// TestWithAuditUserContextOverridesServerDefault verifies the bot path:
+// the bot wraps each investigation's ctx with the Slack user, the MCP handler
+// reads that for the audit identity instead of the server-startup default.
+func TestWithAuditUserContextOverridesServerDefault(t *testing.T) {
+	logger := slog.New(slog.NewJSONHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError}))
+	t.Setenv("MCP_AUDIT_USER", "server-default")
+	server := NewServer(nil, "", nil, logger)
+
+	require.Equal(t, "server-default", server.auditUserFromContext(context.Background()))
+
+	ctx := WithAuditUser(context.Background(), "slack-user-bob")
+	require.Equal(t, "slack-user-bob", server.auditUserFromContext(ctx))
+}
+
+// TestExecuteGrafanaCreateDashboardStampsAuditUserAndIntention verifies a
+// create operation lands in Grafana's version history with both who (audit
+// user) and why (LLM-supplied message) composed into the Message field.
+func TestExecuteGrafanaCreateDashboardStampsAuditUserAndIntention(t *testing.T) {
+	t.Setenv("MCP_AUDIT_USER", "alice")
+	logger := slog.New(slog.NewJSONHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError}))
+
+	var captured DashboardSaveRequest
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewDecoder(r.Body).Decode(&captured)
+		_, _ = w.Write([]byte(`{"id":1,"uid":"dash-uid","url":"/d/dash-uid/test","status":"success","version":1}`))
+	}))
+	t.Cleanup(server.Close)
+
+	grafanaClient, err := NewGrafanaClient(server.URL, "test-key", logger)
+	require.NoError(t, err)
+
+	mcpServer := NewServer(nil, "", nil, logger)
+	mcpServer.grafanaClient = grafanaClient
+
+	args := map[string]interface{}{
+		"title": "ECS Dashboard",
+		"panels": []interface{}{
+			map[string]interface{}{
+				"title":          "CPU",
+				"panelType":      "timeseries",
+				"datasourceType": "prometheus",
+				"datasourceUID":  "prom-prod",
+				"query":          "rate(cpu_seconds_total[5m])",
+			},
+		},
+		"message": "adding ECS CPU dashboard for new service",
+	}
+
+	_, err = mcpServer.executeGrafanaCreateDashboard(t.Context(), args)
+	require.NoError(t, err)
+	require.Equal(t, "alice: adding ECS CPU dashboard for new service", captured.Message)
+}
+
+// TestExecuteGrafanaCreateDashboardUsesDefaultIntentionWhenOmitted verifies
+// the LLM can omit the message and the version note still names the user
+// with a sensible default — the old hardcoded "Auto-generated dashboard: …"
+// dropped the human-context entirely; this preserves attribution.
+func TestExecuteGrafanaCreateDashboardUsesDefaultIntentionWhenOmitted(t *testing.T) {
+	t.Setenv("MCP_AUDIT_USER", "alice")
+	logger := slog.New(slog.NewJSONHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError}))
+
+	var captured DashboardSaveRequest
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewDecoder(r.Body).Decode(&captured)
+		_, _ = w.Write([]byte(`{"id":1,"uid":"dash-uid","url":"/d/dash-uid/test","status":"success","version":1}`))
+	}))
+	t.Cleanup(server.Close)
+
+	grafanaClient, err := NewGrafanaClient(server.URL, "test-key", logger)
+	require.NoError(t, err)
+
+	mcpServer := NewServer(nil, "", nil, logger)
+	mcpServer.grafanaClient = grafanaClient
+
+	args := map[string]interface{}{
+		"title": "ECS Dashboard",
+		"panels": []interface{}{
+			map[string]interface{}{
+				"title":          "CPU",
+				"panelType":      "timeseries",
+				"datasourceType": "prometheus",
+				"datasourceUID":  "prom-prod",
+				"query":          "up",
+			},
+		},
+	}
+
+	_, err = mcpServer.executeGrafanaCreateDashboard(t.Context(), args)
+	require.NoError(t, err)
+	require.Contains(t, captured.Message, "alice", "audit user must always appear in the version note")
+	require.NotContains(t, captured.Message, "Auto-generated dashboard:", "the old hardcoded message must not appear")
+}
+
+// TestExecuteGrafanaUpdateDashboardStampsAuditUserAndIntention verifies the
+// update path composes the same "<user>: <intention>" format. The previous
+// default "Updated via MCP" left no attribution.
+func TestExecuteGrafanaUpdateDashboardStampsAuditUserAndIntention(t *testing.T) {
+	t.Setenv("MCP_AUDIT_USER", "alice")
+	logger := slog.New(slog.NewJSONHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError}))
+
+	var captured DashboardSaveRequest
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// Only the POST to /api/dashboards/db carries the save payload we care about.
+		if r.Method == http.MethodPost && r.URL.Path == "/api/dashboards/db" {
+			_ = json.NewDecoder(r.Body).Decode(&captured)
+		}
+		_, _ = w.Write([]byte(`{"id":1,"uid":"dash-uid","url":"/d/dash-uid/test","status":"success","version":2}`))
+	}))
+	t.Cleanup(server.Close)
+
+	grafanaClient, err := NewGrafanaClient(server.URL, "test-key", logger)
+	require.NoError(t, err)
+
+	mcpServer := NewServer(nil, "", nil, logger)
+	mcpServer.grafanaClient = grafanaClient
+
+	args := map[string]interface{}{
+		"uid": "dash-uid",
+		"dashboard": map[string]interface{}{
+			"uid":   "dash-uid",
+			"title": "New",
+		},
+		"message":   "renamed for clarity",
+		"folderUid": "some-folder",
+	}
+
+	_, err = mcpServer.executeGrafanaUpdateDashboard(t.Context(), args)
+	require.NoError(t, err)
+	require.Equal(t, "alice: renamed for clarity", captured.Message)
+}
+
+// TestExecuteGrafanaDeleteDashboardLogsAuditUserAndIntention verifies the
+// delete path — Grafana's DELETE has no audit body, so slog is the only
+// place attribution lands. The bot's stdout collector ships these into Loki.
+func TestExecuteGrafanaDeleteDashboardLogsAuditUserAndIntention(t *testing.T) {
+	t.Setenv("MCP_AUDIT_USER", "alice")
+
+	var buf bytes.Buffer
+	logger := slog.New(slog.NewJSONHandler(&buf, &slog.HandlerOptions{Level: slog.LevelInfo}))
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(`{"message":"Dashboard deleted","id":1}`))
+	}))
+	t.Cleanup(server.Close)
+
+	grafanaClient, err := NewGrafanaClient(server.URL, "test-key", logger)
+	require.NoError(t, err)
+
+	mcpServer := NewServer(nil, "", nil, logger)
+	mcpServer.grafanaClient = grafanaClient
+
+	args := map[string]interface{}{
+		"uid":     "dash-uid",
+		"message": "obsolete after migration",
+	}
+
+	_, err = mcpServer.executeGrafanaDeleteDashboard(t.Context(), args)
+	require.NoError(t, err)
+
+	logOutput := buf.String()
+	require.Contains(t, logOutput, `"audit_user":"alice"`)
+	require.Contains(t, logOutput, `"message":"alice: obsolete after migration"`, "logged message is the composed version note that would have landed in Grafana")
+	require.Contains(t, logOutput, `"uid":"dash-uid"`)
+	require.Contains(t, logOutput, `"tool":"grafana_delete_dashboard"`)
+	require.Contains(t, logOutput, `"audit_source_ip":"stdio"`, "no HTTP request → stdio default")
+}
+
+// TestExecuteGrafanaCreateFolderLogsAuditUserAndIntention verifies the
+// folder path. Grafana's folder API doesn't persist a version note, so slog
+// is the audit surface here too.
+func TestExecuteGrafanaCreateFolderLogsAuditUserAndIntention(t *testing.T) {
+	t.Setenv("MCP_AUDIT_USER", "alice")
+
+	var buf bytes.Buffer
+	logger := slog.New(slog.NewJSONHandler(&buf, &slog.HandlerOptions{Level: slog.LevelInfo}))
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(`{"id":12,"uid":"ops-uid","title":"Operations","url":"/dashboards/f/ops-uid/operations","version":1}`))
+	}))
+	t.Cleanup(server.Close)
+
+	grafanaClient, err := NewGrafanaClient(server.URL, "test-key", logger)
+	require.NoError(t, err)
+
+	mcpServer := NewServer(nil, "", nil, logger)
+	mcpServer.grafanaClient = grafanaClient
+
+	args := map[string]interface{}{
+		"title":   "Operations",
+		"message": "grouping ops dashboards",
+	}
+
+	_, err = mcpServer.executeGrafanaCreateFolder(t.Context(), args)
+	require.NoError(t, err)
+
+	logOutput := buf.String()
+	require.Contains(t, logOutput, `"audit_user":"alice"`)
+	require.Contains(t, logOutput, `"message":"alice: grouping ops dashboards"`)
+	require.Contains(t, logOutput, `"tool":"grafana_create_folder"`)
+	require.Contains(t, logOutput, `"audit_source_ip":"stdio"`)
+}
+
+// TestExecuteGrafanaDeleteDashboardLogsHTTPSourceIP verifies the HTTP/SSE
+// transport path: when the request context carries a client IP (injected
+// by the middleware), it lands in the audit slog line instead of "stdio".
+func TestExecuteGrafanaDeleteDashboardLogsHTTPSourceIP(t *testing.T) {
+	t.Setenv("MCP_AUDIT_USER", "alice")
+
+	var buf bytes.Buffer
+	logger := slog.New(slog.NewJSONHandler(&buf, &slog.HandlerOptions{Level: slog.LevelInfo}))
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(`{"message":"Dashboard deleted","id":1}`))
+	}))
+	t.Cleanup(server.Close)
+
+	grafanaClient, err := NewGrafanaClient(server.URL, "test-key", logger)
+	require.NoError(t, err)
+
+	mcpServer := NewServer(nil, "", nil, logger)
+	mcpServer.grafanaClient = grafanaClient
+
+	ctx := WithAuditSourceIP(t.Context(), "10.0.1.5")
+	_, err = mcpServer.executeGrafanaDeleteDashboard(ctx, map[string]interface{}{
+		"uid":     "dash-uid",
+		"message": "cleanup",
+	})
+	require.NoError(t, err)
+
+	require.Contains(t, buf.String(), `"audit_source_ip":"10.0.1.5"`)
 }

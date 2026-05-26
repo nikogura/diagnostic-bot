@@ -252,12 +252,13 @@ When `CLOUDWATCH_ACCOUNTS` is configured with multiple accounts, the `accounts` 
 - `prometheus_label_values` — Get all values for a given label name
 - `prometheus_list_endpoints` — List configured Prometheus endpoints
 
-**Grafana** — requires `GRAFANA_URL` + `GRAFANA_API_KEY`:
+**Grafana** — requires `GRAFANA_URL` + `GRAFANA_API_KEY`. Write operations stamp every change with an audit user (resolved at MCP server startup) and an LLM-supplied intention. See [Grafana audit attribution](#grafana-audit-attribution):
 - `grafana_list_dashboards` — List all Grafana dashboards
 - `grafana_get_dashboard` — Get a specific dashboard by UID
-- `grafana_create_dashboard` — Create a new dashboard from queries
-- `grafana_update_dashboard` — Update an existing dashboard
-- `grafana_delete_dashboard` — Delete a dashboard
+- `grafana_create_dashboard` — Create a new dashboard from queries. Accepts an optional `message` (the intention) that is composed with the audit user into Grafana's version history.
+- `grafana_update_dashboard` — Update an existing dashboard. Accepts `message`; same composition as create.
+- `grafana_delete_dashboard` — Delete a dashboard. Accepts `message`; recorded in slog only (Grafana DELETE has no version history).
+- `grafana_create_folder` — Create a folder (directory). Accepts `message`; recorded in slog only.
 
 **Database** — requires `DATABASE_URL` or `DATABASE_<NAME>_URL`:
 - `database_query` — Execute read-only SQL queries (SELECT, SHOW, DESCRIBE, EXPLAIN)
@@ -467,7 +468,7 @@ The bot uses Claude Code CLI with a custom MCP (Model Context Protocol) server t
 | Loki (Logging) | `LOKI_ENDPOINT` (multi-tenant: `LOKI_DEFAULT_ORG_ID`, optional `LOKI_ORG_IDS`) | `query_loki` |
 | CloudWatch Logs | `CLOUDWATCH_ACCOUNTS` or `CLOUDWATCH_ASSUME_ROLE` | `cloudwatch_logs_query`, `cloudwatch_logs_list_groups`, `cloudwatch_logs_get_events` |
 | Prometheus | `PROMETHEUS_URL` or `PROMETHEUS_<NAME>_URL` | `prometheus_query`, `prometheus_query_range`, `prometheus_series`, `prometheus_label_values`, `prometheus_list_endpoints` |
-| Grafana | `GRAFANA_URL` + `GRAFANA_API_KEY` | `grafana_list_dashboards`, `grafana_get_dashboard`, `grafana_create_dashboard`, `grafana_update_dashboard`, `grafana_delete_dashboard` |
+| Grafana | `GRAFANA_URL` + `GRAFANA_API_KEY` (optional: `MCP_AUDIT_USER` for write attribution) | `grafana_list_dashboards`, `grafana_get_dashboard`, `grafana_create_dashboard`, `grafana_update_dashboard`, `grafana_delete_dashboard`, `grafana_create_folder` |
 | Database | `DATABASE_URL` or `DATABASE_<NAME>_URL` | `database_query`, `database_list` |
 | GitHub | `GITHUB_TOKEN` | `github_get_file`, `github_list_directory`, `github_search_code` |
 | ECR | `AWS_REGION` or `AWS_DEFAULT_REGION` | `ecr_scan_results` |
@@ -475,6 +476,28 @@ The bot uses Claude Code CLI with a custom MCP (Model Context Protocol) server t
 | Utilities | *(always available)* | `whois_lookup`, `generate_pdf` |
 
 See `pkg/bot/tools.go` for the env var detection logic and `pkg/mcp/server.go` for conditional tool registration.
+
+### Grafana audit attribution
+
+Every Grafana write performed through the MCP server is stamped with two pieces of information so changes are traceable after the fact:
+
+- **Audit user (who).** Resolved once at MCP server startup. Priority:
+  1. `MCP_AUDIT_USER` environment variable, if set — explicit override for containers, CI, or any deployment where the OS user isn't the right identity.
+  2. `user.Current()` — the local OS user. For Claude Code running the MCP server over stdio, this is the developer running Claude Code.
+  3. `mcp-server` — last-resort fallback, with a warning logged.
+- **Intention (why).** Optional `message` parameter accepted by each write tool. The LLM supplies a short description of what is being changed and why. When omitted, a tool-specific default (`created via mcp`, `updated via mcp`, `deleted via mcp`) is used so the audit user still lands on the change.
+
+The two are composed as `"<audit_user>: <intention>"` and written to:
+- **Grafana's version history** for `grafana_create_dashboard` and `grafana_update_dashboard` — visible from the dashboard's Versions tab.
+- **Slog (INFO)** on every write tool, with structured fields `tool`, `uid`, `title`, `audit_user`, `audit_source_ip`, and `message`. Deletes and folder creates have no version-history surface in Grafana, so slog is the only audit trail — the bot's stdout collector ships these into Loki.
+
+**`audit_source_ip` — corroborating evidence for HTTP/SSE callers.** The HTTP and SSE handlers are wrapped in `mcp.WithAuditSourceMiddleware`, which extracts the originating client IP (X-Forwarded-For first hop, then X-Real-IP, then `RemoteAddr` with port stripped) and threads it through the request context. Every Grafana-write slog line carries the resolved IP. Notes:
+- The Slack-bot stdio path has no network peer, so the field is the literal string `stdio`.
+- Port-forwarded callers (`kubectl port-forward` into the MCP server pod) surface as `127.0.0.1`. Port-forward access requires cluster RBAC, so the value `127.0.0.1` in this field is itself a signal that the action came from a cluster admin and you should consult kube audit logs for the human identity behind the port-forward session.
+- Direct HTTP callers expose their real IP (subject to trust of the ingress's XFF, which is fine for the VPC-gated deployment).
+- IP is **not** identity. Same NAT egress = same IP for multiple humans; this is forensic corroboration, not authentication.
+
+Per-request override: callers that have a more authoritative identity than the process owner (e.g. the Slack bot, which has the Slack user ID for the human who started the investigation) can override the audit user per-request with `mcp.WithAuditUser(ctx, "alice")`. The MCP tool handler reads from context first, falls back to the startup-resolved default.
 
 ### Architecture
 
@@ -572,6 +595,7 @@ The bot is configured via environment variables:
 - `PROMETHEUS_URL` - Prometheus endpoint (enables Prometheus tools). Multiple endpoints: use `PROMETHEUS_<NAME>_URL` pattern
 - `GRAFANA_URL` - Grafana instance URL (requires `GRAFANA_API_KEY`)
 - `GRAFANA_API_KEY` - Grafana API key (required with `GRAFANA_URL`, enables Grafana tools)
+- `MCP_AUDIT_USER` - Explicit audit identity stamped on every Grafana write (create/update/delete dashboard, create folder). Optional. When unset, the MCP server falls back to the OS user (`user.Current()`) — which is the developer running Claude Code locally. See [Grafana audit attribution](#grafana-audit-attribution).
 - `DATABASE_URL` - Database connection string (enables Database tools). Multiple databases: use `DATABASE_<NAME>_URL` pattern
 - `GITHUB_TOKEN` - Personal access token for GitHub tools
 - `AWS_REGION` or `AWS_DEFAULT_REGION` - AWS region (enables ECR tools)

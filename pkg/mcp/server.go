@@ -67,6 +67,7 @@ type Server struct {
 	apiToolRegistry         *apiconfig.APIToolRegistry
 	logger                  *slog.Logger
 	companyName             string
+	auditUser               string
 }
 
 // NewServer creates a new MCP server.
@@ -162,6 +163,7 @@ func NewServer(lokiClient *k8s.LokiClient, githubToken string, apiToolRegistry *
 		apiToolRegistry:         apiToolRegistry,
 		logger:                  logger,
 		companyName:             companyName,
+		auditUser:               resolveAuditUser(logger),
 	}
 
 	return result
@@ -697,6 +699,10 @@ func getGrafanaCreateDashboardTool() (tool MCPTool) {
 					"type":        "string",
 					"description": "Folder UID to create the dashboard in. If omitted, creates in the General folder.",
 				},
+				"message": map[string]interface{}{
+					"type":        "string",
+					"description": "Short description of why this dashboard is being created (the intention). Lands in Grafana's version history alongside the audit user.",
+				},
 			},
 			"required": []string{"title", "panels"},
 		},
@@ -743,6 +749,10 @@ func getGrafanaModifyTools() (result []MCPTool) {
 						"type":        "string",
 						"description": "Dashboard UID to delete",
 					},
+					"message": map[string]interface{}{
+						"type":        "string",
+						"description": "Short description of why this dashboard is being deleted. Grafana's DELETE leaves no version history; the deletion is recorded in the bot's slog with the audit user and this reason.",
+					},
 				},
 				"required": []string{"uid"},
 			},
@@ -764,6 +774,10 @@ func getGrafanaModifyTools() (result []MCPTool) {
 					"parentUid": map[string]interface{}{
 						"type":        "string",
 						"description": "Optional parent folder UID for nested folders. Omit to create at the top level.",
+					},
+					"message": map[string]interface{}{
+						"type":        "string",
+						"description": "Short description of why this folder is being created. Recorded in the bot's slog with the audit user (Grafana's folder API has no version history).",
 					},
 				},
 				"required": []string{"title"},
@@ -1583,13 +1597,25 @@ func (s *Server) executeGrafanaCreateDashboard(ctx context.Context, args map[str
 	}
 
 	folderUID, _ := args["folderUid"].(string)
+	intention, _ := args["message"].(string)
+	auditUser := s.auditUserFromContext(ctx)
+	versionNote := composeVersionNote(auditUser, intention, "created via mcp")
 
 	// Create the dashboard with multi-datasource support
 	var uid string
-	uid, err = s.grafanaClient.CreateDashboardFromQueries(ctx, title, panels, folderUID)
+	uid, err = s.grafanaClient.CreateDashboardFromQueries(ctx, title, panels, folderUID, versionNote)
 	if err != nil {
 		return result, err
 	}
+
+	s.logger.InfoContext(ctx, "grafana write",
+		slog.String("tool", toolGrafanaCreateDashboard),
+		slog.String("uid", uid),
+		slog.String("title", title),
+		slog.String("audit_user", auditUser),
+		slog.String("audit_source_ip", auditSourceFromContext(ctx)),
+		slog.String("message", versionNote),
+	)
 
 	result = fmt.Sprintf("Successfully created dashboard '%s' with UID: %s\n\nDashboard URL: %s/d/%s/%s",
 		title, uid, s.grafanaClient.baseURL, uid, strings.ReplaceAll(strings.ToLower(title), " ", "-"))
@@ -1615,10 +1641,9 @@ func (s *Server) executeGrafanaUpdateDashboard(ctx context.Context, args map[str
 		return result, err
 	}
 
-	message, _ := args["message"].(string)
-	if message == "" {
-		message = "Updated via MCP"
-	}
+	intention, _ := args["message"].(string)
+	auditUser := s.auditUserFromContext(ctx)
+	versionNote := composeVersionNote(auditUser, intention, "updated via mcp")
 
 	// Determine target folder: use explicit folderUid if provided,
 	// otherwise fetch the existing dashboard's folder to preserve placement.
@@ -1650,10 +1675,19 @@ func (s *Server) executeGrafanaUpdateDashboard(ctx context.Context, args map[str
 
 	dashboard.UID = uid
 
-	err = s.grafanaClient.UpdateDashboard(ctx, &dashboard, folderUID, message)
+	err = s.grafanaClient.UpdateDashboard(ctx, &dashboard, folderUID, versionNote)
 	if err != nil {
 		return result, err
 	}
+
+	s.logger.InfoContext(ctx, "grafana write",
+		slog.String("tool", toolGrafanaUpdateDashboard),
+		slog.String("uid", uid),
+		slog.String("title", dashboard.Title),
+		slog.String("audit_user", auditUser),
+		slog.String("audit_source_ip", auditSourceFromContext(ctx)),
+		slog.String("message", versionNote),
+	)
 
 	result = fmt.Sprintf("Successfully updated dashboard with UID: %s", uid)
 	return result, err
@@ -1675,6 +1709,10 @@ func (s *Server) executeGrafanaCreateFolder(ctx context.Context, args map[string
 	uid, _ := args["uid"].(string)
 	parentUID, _ := args["parentUid"].(string)
 
+	intention, _ := args["message"].(string)
+	auditUser := s.auditUserFromContext(ctx)
+	versionNote := composeVersionNote(auditUser, intention, "created via mcp")
+
 	var folder Folder
 	folder, err = s.grafanaClient.CreateFolder(ctx, CreateFolderRequest{
 		Title:     title,
@@ -1684,6 +1722,17 @@ func (s *Server) executeGrafanaCreateFolder(ctx context.Context, args map[string
 	if err != nil {
 		return result, err
 	}
+
+	// Grafana folders carry no version history; slog is the audit surface.
+	s.logger.InfoContext(ctx, "grafana write",
+		slog.String("tool", toolGrafanaCreateFolder),
+		slog.String("uid", folder.UID),
+		slog.String("title", folder.Title),
+		slog.String("parent_uid", folder.ParentUID),
+		slog.String("audit_user", auditUser),
+		slog.String("audit_source_ip", auditSourceFromContext(ctx)),
+		slog.String("message", versionNote),
+	)
 
 	result = fmt.Sprintf("Successfully created folder '%s' with UID: %s", folder.Title, folder.UID)
 	if folder.ParentUID != "" {
@@ -1705,10 +1754,24 @@ func (s *Server) executeGrafanaDeleteDashboard(ctx context.Context, args map[str
 		return result, err
 	}
 
+	intention, _ := args["message"].(string)
+	auditUser := s.auditUserFromContext(ctx)
+	versionNote := composeVersionNote(auditUser, intention, "deleted via mcp")
+
 	err = s.grafanaClient.DeleteDashboard(ctx, uid)
 	if err != nil {
 		return result, err
 	}
+
+	// Grafana's DELETE leaves no version history, so slog is the only audit
+	// surface for deletes. The bot ships stdout to Loki.
+	s.logger.InfoContext(ctx, "grafana write",
+		slog.String("tool", toolGrafanaDeleteDashboard),
+		slog.String("uid", uid),
+		slog.String("audit_user", auditUser),
+		slog.String("audit_source_ip", auditSourceFromContext(ctx)),
+		slog.String("message", versionNote),
+	)
 
 	result = fmt.Sprintf("Successfully deleted dashboard with UID: %s", uid)
 	return result, err

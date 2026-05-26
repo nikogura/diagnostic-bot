@@ -608,7 +608,7 @@ func TestGrafanaClientCreateDashboardFromQueries(t *testing.T) {
 	client, err := NewGrafanaClient(server.URL, "test-api-key", logger)
 	require.NoError(t, err)
 
-	uid, err := client.CreateDashboardFromQueries(ctx, "Multi-Datasource Dashboard", queries, "")
+	uid, err := client.CreateDashboardFromQueries(ctx, "Multi-Datasource Dashboard", queries, "", "test: multi-datasource")
 	require.NoError(t, err)
 	assert.Equal(t, "multi-datasource-uid", uid)
 }
@@ -849,7 +849,7 @@ func TestCreateDashboardFromQueriesInfinity(t *testing.T) {
 	client, err := NewGrafanaClient(server.URL, "test-api-key", logger)
 	require.NoError(t, err)
 
-	uid, err := client.CreateDashboardFromQueries(ctx, "Infinity Dashboard", queries, "")
+	uid, err := client.CreateDashboardFromQueries(ctx, "Infinity Dashboard", queries, "", "test: infinity dashboard")
 	require.NoError(t, err)
 	assert.Equal(t, "infinity-dash-uid", uid)
 }
