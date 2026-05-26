@@ -9,6 +9,8 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	"net/url"
+	"strconv"
 	"time"
 )
 
@@ -301,6 +303,69 @@ func (c *GrafanaClient) GetDashboard(ctx context.Context, uid string) (result *D
 	return result, err
 }
 
+// ListDashboardVersions returns the raw JSON array body of a dashboard's
+// version history. limit and start are optional pagination params (pass 0
+// to omit). The response is returned verbatim so the LLM sees every
+// version metadata field Grafana emits.
+func (c *GrafanaClient) ListDashboardVersions(ctx context.Context, uid string, limit, start int) (versions json.RawMessage, err error) {
+	endpoint := fmt.Sprintf("/api/dashboards/uid/%s/versions", uid)
+	params := url.Values{}
+	if limit > 0 {
+		params.Set("limit", strconv.Itoa(limit))
+	}
+	if start > 0 {
+		params.Set("start", strconv.Itoa(start))
+	}
+	if len(params) > 0 {
+		endpoint = fmt.Sprintf("%s?%s", endpoint, params.Encode())
+	}
+
+	versions, err = c.makeRequest(ctx, http.MethodGet, endpoint, nil)
+	if err != nil {
+		err = fmt.Errorf("listing versions for dashboard %s: %w", uid, err)
+		return versions, err
+	}
+
+	c.logger.InfoContext(ctx, "listed dashboard versions", "uid", uid)
+	return versions, err
+}
+
+// GetDashboardVersion returns the raw JSON body for one specific version
+// (metadata plus the full `data` payload). Uses the user-facing version
+// number, not the internal row id, per Grafana's HTTP API spec.
+func (c *GrafanaClient) GetDashboardVersion(ctx context.Context, uid string, version int) (body json.RawMessage, err error) {
+	endpoint := fmt.Sprintf("/api/dashboards/uid/%s/versions/%d", uid, version)
+
+	body, err = c.makeRequest(ctx, http.MethodGet, endpoint, nil)
+	if err != nil {
+		err = fmt.Errorf("getting version %d of dashboard %s: %w", version, uid, err)
+		return body, err
+	}
+
+	c.logger.InfoContext(ctx, "retrieved dashboard version", "uid", uid, "version", version)
+	return body, err
+}
+
+// RestoreDashboardVersion restores a dashboard to a previous version.
+// Grafana stamps the new version with "Restored from version N" itself;
+// we do not inject our own audit message because by definition restore
+// is a revert to a known prior state — the version-history provenance
+// is the audit. The bot still emits a slog INFO at the executor for our
+// own forensic record.
+func (c *GrafanaClient) RestoreDashboardVersion(ctx context.Context, uid string, version int) (response json.RawMessage, err error) {
+	endpoint := fmt.Sprintf("/api/dashboards/uid/%s/restore", uid)
+	body := map[string]int{"version": version}
+
+	response, err = c.makeRequest(ctx, http.MethodPost, endpoint, body)
+	if err != nil {
+		err = fmt.Errorf("restoring dashboard %s to version %d: %w", uid, version, err)
+		return response, err
+	}
+
+	c.logger.InfoContext(ctx, "restored dashboard version", "uid", uid, "version", version)
+	return response, err
+}
+
 // CreateDashboard creates a new dashboard.
 func (c *GrafanaClient) CreateDashboard(ctx context.Context, dashboard *Dashboard, folderUID string, message string) (uid string, err error) {
 	// Ensure new dashboard doesn't have ID
@@ -340,6 +405,54 @@ func (c *GrafanaClient) CreateDashboard(ctx context.Context, dashboard *Dashboar
 	c.logger.InfoContext(ctx, "created dashboard",
 		"uid", uid,
 		"title", dashboard.Title,
+		"url", response.URL,
+	)
+	return uid, err
+}
+
+// CreateDashboardRaw creates a dashboard from a raw JSON payload — the
+// opaque-bytes companion to CreateDashboard, mirroring the lossless
+// UpdateDashboard path. Use this when the caller's dashboard contains
+// fields the typed Dashboard/Panel/Target model doesn't cover
+// (Elasticsearch metrics/bucketAggs, OpenSearch, custom datasource plugin
+// fields, etc.). Returns the new dashboard's UID.
+func (c *GrafanaClient) CreateDashboardRaw(ctx context.Context, dashboard json.RawMessage, folderUID, message string) (uid string, err error) {
+	request := dashboardSaveRequestRaw{
+		Dashboard: dashboard,
+		Message:   message,
+		Overwrite: false,
+		FolderUID: folderUID,
+	}
+
+	var responseBody []byte
+	responseBody, err = c.makeRequest(ctx, http.MethodPost, "/api/dashboards/db", request)
+	if err != nil {
+		err = fmt.Errorf("creating dashboard: %w", err)
+		return uid, err
+	}
+
+	var response struct {
+		UID    string `json:"uid"`
+		URL    string `json:"url"`
+		Status string `json:"status"`
+	}
+	err = json.Unmarshal(responseBody, &response)
+	if err != nil {
+		err = fmt.Errorf("unmarshaling create response: %w", err)
+		return uid, err
+	}
+
+	// Best-effort title peek for the breadcrumb log; the executor emits
+	// the authoritative audit slog line.
+	var peek struct {
+		Title string `json:"title"`
+	}
+	_ = json.Unmarshal(dashboard, &peek)
+
+	uid = response.UID
+	c.logger.InfoContext(ctx, "created dashboard (raw)",
+		"uid", uid,
+		"title", peek.Title,
 		"url", response.URL,
 	)
 	return uid, err

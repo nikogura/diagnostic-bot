@@ -35,22 +35,24 @@ const (
 
 // Tool name constants.
 const (
-	toolQueryLoki              = "query_loki"
-	toolWhoisLookup            = "whois_lookup"
-	toolGeneratePDF            = "generate_pdf"
-	toolGitHubGetFile          = "github_get_file"
-	toolGitHubListDirectory    = "github_list_directory"
-	toolGitHubSearchCode       = "github_search_code"
-	toolECRScanResults         = "ecr_scan_results"
-	toolDatabaseQuery          = "database_query"
-	toolDatabaseList           = "database_list"
-	toolGrafanaListDashboards  = "grafana_list_dashboards"
-	toolGrafanaGetDashboard    = "grafana_get_dashboard"
-	toolGrafanaCreateDashboard = "grafana_create_dashboard"
-	toolGrafanaUpdateDashboard = "grafana_update_dashboard"
-	toolGrafanaPatchDashboard  = "grafana_patch_dashboard"
-	toolGrafanaDeleteDashboard = "grafana_delete_dashboard"
-	toolGrafanaCreateFolder    = "grafana_create_folder"
+	toolQueryLoki                      = "query_loki"
+	toolWhoisLookup                    = "whois_lookup"
+	toolGeneratePDF                    = "generate_pdf"
+	toolGitHubGetFile                  = "github_get_file"
+	toolGitHubListDirectory            = "github_list_directory"
+	toolGitHubSearchCode               = "github_search_code"
+	toolECRScanResults                 = "ecr_scan_results"
+	toolDatabaseQuery                  = "database_query"
+	toolDatabaseList                   = "database_list"
+	toolGrafanaListDashboards          = "grafana_list_dashboards"
+	toolGrafanaGetDashboard            = "grafana_get_dashboard"
+	toolGrafanaCreateDashboard         = "grafana_create_dashboard"
+	toolGrafanaUpdateDashboard         = "grafana_update_dashboard"
+	toolGrafanaPatchDashboard          = "grafana_patch_dashboard"
+	toolGrafanaDeleteDashboard         = "grafana_delete_dashboard"
+	toolGrafanaCreateFolder            = "grafana_create_folder"
+	toolGrafanaGetDashboardVersion     = "grafana_get_dashboard_version"
+	toolGrafanaRestoreDashboardVersion = "grafana_restore_dashboard_version"
 	// CloudWatch Logs tools are defined in cloudwatch.go.
 	// Prometheus tools are defined in prometheus.go.
 )
@@ -539,6 +541,32 @@ func getGrafanaReadTools() (result []MCPTool) {
 				"required": []string{"uid"},
 			},
 		},
+		{
+			Name:        toolGrafanaGetDashboardVersion,
+			Description: "Fetch dashboard version history. With only `uid`, lists all versions for that dashboard. With `uid` and `version`, fetches that specific version's full payload (metadata plus the saved dashboard `data`). Useful for diffing against the current state, picking a version to restore, or recovering content from a previous save.",
+			InputSchema: map[string]interface{}{
+				"type": "object",
+				"properties": map[string]interface{}{
+					"uid": map[string]interface{}{
+						"type":        "string",
+						"description": "Dashboard UID",
+					},
+					"version": map[string]interface{}{
+						"type":        "integer",
+						"description": "Version number (user-facing, from a previous list result). Omit to list all versions instead.",
+					},
+					"limit": map[string]interface{}{
+						"type":        "integer",
+						"description": "Optional list mode only: cap on number of versions returned (Grafana default: 1000).",
+					},
+					"start": map[string]interface{}{
+						"type":        "integer",
+						"description": "Optional list mode only: version number to start from (for pagination).",
+					},
+				},
+				"required": []string{"uid"},
+			},
+		},
 	}
 	return result
 }
@@ -680,22 +708,26 @@ func addInfinitySchemaProperties(props map[string]interface{}) {
 func getGrafanaCreateDashboardTool() (tool MCPTool) {
 	tool = MCPTool{
 		Name:        toolGrafanaCreateDashboard,
-		Description: "Create a new Grafana dashboard from queries. Supports SQL (PostgreSQL/MySQL), Prometheus (PromQL), CloudWatch metrics, and Infinity datasources (GraphQL/REST APIs). Ideal for CEO-level business and operational metrics dashboards.",
+		Description: "Create a new Grafana dashboard. Two modes: (1) typed builder via `panels` — convenient for SQL/Prometheus/CloudWatch/Infinity dashboards where the bot composes the JSON from PanelQueryConfig; (2) raw `dashboard` JSON — pass the full dashboard object verbatim, useful for Elasticsearch/OpenSearch (metrics, bucketAggs) or any datasource whose target fields the typed model doesn't cover. Supply exactly one of `panels` or `dashboard`.",
 		InputSchema: map[string]interface{}{
 			"type": "object",
 			"properties": map[string]interface{}{
 				"title": map[string]interface{}{
 					"type":        "string",
-					"description": "Dashboard title",
+					"description": "Dashboard title (required for builder mode; for raw `dashboard` mode the title inside the object is what Grafana stores, but this top-level value is still required for audit logging).",
 				},
 				"panels": map[string]interface{}{
 					"type":        "array",
-					"description": "Array of panel configurations",
+					"description": "Builder mode: array of panel configurations. Mutually exclusive with `dashboard`.",
 					"items": map[string]interface{}{
 						"type":       "object",
 						"properties": getPanelSchemaProperties(),
 						"required":   []string{"title", "panelType"},
 					},
+				},
+				"dashboard": map[string]interface{}{
+					"type":        "object",
+					"description": "Raw mode: complete dashboard JSON object, POSTed verbatim. Use this when panel targets contain datasource-specific fields the typed builder doesn't model (Elasticsearch metrics/bucketAggs, OpenSearch, etc.). Mutually exclusive with `panels`.",
 				},
 				"folderUid": map[string]interface{}{
 					"type":        "string",
@@ -706,7 +738,7 @@ func getGrafanaCreateDashboardTool() (tool MCPTool) {
 					"description": "Short description of why this dashboard is being created (the intention). Lands in Grafana's version history alongside the audit user.",
 				},
 			},
-			"required": []string{"title", "panels"},
+			"required": []string{"title"},
 		},
 	}
 	return tool
@@ -793,6 +825,24 @@ func getGrafanaModifyTools() (result []MCPTool) {
 					},
 				},
 				"required": []string{"uid"},
+			},
+		},
+		{
+			Name:        toolGrafanaRestoreDashboardVersion,
+			Description: "Restore a Grafana dashboard to a previous version. Grafana itself stamps the new version with 'Restored from version N' — the audit invariant we apply to other writes is intentionally not applied here, since by definition a restore reverts to a known prior state and the version history alone is the audit trail. The bot still records the restore in slog with audit_user and audit_source_ip for forensic purposes.",
+			InputSchema: map[string]interface{}{
+				"type": "object",
+				"properties": map[string]interface{}{
+					"uid": map[string]interface{}{
+						"type":        "string",
+						"description": "Dashboard UID",
+					},
+					"version": map[string]interface{}{
+						"type":        "integer",
+						"description": "Version number to restore (from grafana_get_dashboard_version's list output).",
+					},
+				},
+				"required": []string{"uid", "version"},
 			},
 		},
 		{
@@ -943,6 +993,10 @@ func (s *Server) dispatchToolCall(ctx context.Context, toolName string, args map
 		result, err = s.executeGrafanaListDashboards(ctx, args)
 	case toolGrafanaGetDashboard:
 		result, err = s.executeGrafanaGetDashboard(ctx, args)
+	case toolGrafanaGetDashboardVersion:
+		result, err = s.executeGrafanaGetDashboardVersion(ctx, args)
+	case toolGrafanaRestoreDashboardVersion:
+		result, err = s.executeGrafanaRestoreDashboardVersion(ctx, args)
 	case toolGrafanaCreateDashboard:
 		result, err = s.executeGrafanaCreateDashboard(ctx, args)
 	case toolGrafanaUpdateDashboard:
@@ -1511,6 +1565,94 @@ func (s *Server) executeGrafanaGetDashboard(ctx context.Context, args map[string
 	return result, err
 }
 
+// executeGrafanaGetDashboardVersion is a two-mode tool: with only `uid`,
+// it lists all versions; with `uid` and `version`, it fetches that
+// version's full payload. Both modes return the raw Grafana response so
+// no unmodeled fields are stripped — same contract as grafana_get_dashboard.
+func (s *Server) executeGrafanaGetDashboardVersion(ctx context.Context, args map[string]interface{}) (result string, err error) {
+	if s.grafanaClient == nil {
+		err = errors.New("grafana access not configured (GRAFANA_URL or GRAFANA_API_KEY not set)")
+		return result, err
+	}
+
+	uid, _ := args["uid"].(string)
+	if uid == "" {
+		err = errors.New("uid parameter is required")
+		return result, err
+	}
+
+	var body json.RawMessage
+
+	versionFloat, hasVersion := args["version"].(float64)
+	if hasVersion {
+		body, err = s.grafanaClient.GetDashboardVersion(ctx, uid, int(versionFloat))
+		if err != nil {
+			return result, err
+		}
+		result = string(body)
+		return result, err
+	}
+
+	// List mode.
+	limit := 0
+	if l, ok := args["limit"].(float64); ok {
+		limit = int(l)
+	}
+	start := 0
+	if s, ok := args["start"].(float64); ok {
+		start = int(s)
+	}
+
+	body, err = s.grafanaClient.ListDashboardVersions(ctx, uid, limit, start)
+	if err != nil {
+		return result, err
+	}
+	result = string(body)
+	return result, err
+}
+
+// executeGrafanaRestoreDashboardVersion restores a dashboard to a previous
+// version. Grafana stamps the new version with "Restored from version N";
+// we don't override that (restore IS the audit). For our own forensic
+// trail, we still emit a slog INFO with audit_user and audit_source_ip.
+func (s *Server) executeGrafanaRestoreDashboardVersion(ctx context.Context, args map[string]interface{}) (result string, err error) {
+	if s.grafanaClient == nil {
+		err = errors.New("grafana access not configured (GRAFANA_URL or GRAFANA_API_KEY not set)")
+		return result, err
+	}
+
+	uid, _ := args["uid"].(string)
+	if uid == "" {
+		err = errors.New("uid parameter is required")
+		return result, err
+	}
+
+	versionFloat, hasVersion := args["version"].(float64)
+	if !hasVersion {
+		err = errors.New("version parameter is required (the version number to restore, from grafana_get_dashboard_version's list output)")
+		return result, err
+	}
+	version := int(versionFloat)
+
+	var response json.RawMessage
+	response, err = s.grafanaClient.RestoreDashboardVersion(ctx, uid, version)
+	if err != nil {
+		return result, err
+	}
+
+	auditUser := s.auditUserFromContext(ctx)
+	s.logger.InfoContext(ctx, "grafana write",
+		slog.String("tool", toolGrafanaRestoreDashboardVersion),
+		slog.String("uid", uid),
+		slog.Int("restored_version", version),
+		slog.String("audit_user", auditUser),
+		slog.String("audit_source_ip", auditSourceFromContext(ctx)),
+	)
+
+	result = fmt.Sprintf("Successfully restored dashboard %s to version %d.\n\n%s", uid, version, string(response))
+	return result, err
+}
+
 // parsePanelConfigs parses raw panel data into PanelQueryConfig structs.
 func (s *Server) parsePanelConfigs(panelsRaw []interface{}) (panels []PanelQueryConfig, err error) {
 	for i, panelRaw := range panelsRaw {
@@ -1622,17 +1764,17 @@ func (s *Server) executeGrafanaCreateDashboard(ctx context.Context, args map[str
 		return result, err
 	}
 
-	// Parse panels array
-	panelsRaw, ok := args["panels"].([]interface{})
-	if !ok || len(panelsRaw) == 0 {
-		err = errors.New("panels parameter is required and must be a non-empty array")
+	// Validate mode selection: exactly one of `panels` (typed builder)
+	// or `dashboard` (raw bytes). Raw mode exists for datasource families
+	// the typed model doesn't cover (Elasticsearch metrics/bucketAggs, etc.).
+	panelsRaw, hasPanels := args["panels"].([]interface{})
+	dashboardRaw, hasDashboard := args["dashboard"].(map[string]interface{})
+	if !hasPanels && !hasDashboard {
+		err = errors.New("must supply exactly one of `panels` (typed builder) or `dashboard` (raw JSON object)")
 		return result, err
 	}
-
-	// Parse panels into PanelQueryConfig for multi-datasource support
-	var panels []PanelQueryConfig
-	panels, err = s.parsePanelConfigs(panelsRaw)
-	if err != nil {
+	if hasPanels && hasDashboard {
+		err = errors.New("must supply exactly one of `panels` or `dashboard`, not both")
 		return result, err
 	}
 
@@ -1641,9 +1783,12 @@ func (s *Server) executeGrafanaCreateDashboard(ctx context.Context, args map[str
 	auditUser := s.auditUserFromContext(ctx)
 	versionNote := composeVersionNote(auditUser, intention, "created via mcp")
 
-	// Create the dashboard with multi-datasource support
 	var uid string
-	uid, err = s.grafanaClient.CreateDashboardFromQueries(ctx, title, panels, folderUID, versionNote)
+	if hasDashboard {
+		uid, err = s.createDashboardRawPath(ctx, dashboardRaw, folderUID, versionNote)
+	} else {
+		uid, err = s.createDashboardBuilderPath(ctx, panelsRaw, title, folderUID, versionNote)
+	}
 	if err != nil {
 		return result, err
 	}
@@ -1660,6 +1805,39 @@ func (s *Server) executeGrafanaCreateDashboard(ctx context.Context, args map[str
 	result = fmt.Sprintf("Successfully created dashboard '%s' with UID: %s\n\nDashboard URL: %s/d/%s/%s",
 		title, uid, s.grafanaClient.baseURL, uid, strings.ReplaceAll(strings.ToLower(title), " ", "-"))
 	return result, err
+}
+
+// createDashboardRawPath POSTs the caller's dashboard payload verbatim.
+// Used when the LLM supplies a raw `dashboard` JSON object on create —
+// the path Elasticsearch/OpenSearch dashboards must take since the typed
+// builder doesn't model metrics/bucketAggs (issue #17).
+func (s *Server) createDashboardRawPath(ctx context.Context, dashboardRaw map[string]interface{}, folderUID, versionNote string) (uid string, err error) {
+	var dashboardBytes []byte
+	dashboardBytes, err = json.Marshal(dashboardRaw)
+	if err != nil {
+		err = fmt.Errorf("marshaling dashboard: %w", err)
+		return uid, err
+	}
+	uid, err = s.grafanaClient.CreateDashboardRaw(ctx, dashboardBytes, folderUID, versionNote)
+	return uid, err
+}
+
+// createDashboardBuilderPath runs the typed builder. Used when the LLM
+// supplies `panels` as configuration that the bot composes into a
+// Dashboard{}. Convenient for SQL/Prometheus/CloudWatch/Infinity; cannot
+// express datasource types whose targets aren't modeled.
+func (s *Server) createDashboardBuilderPath(ctx context.Context, panelsRaw []interface{}, title, folderUID, versionNote string) (uid string, err error) {
+	if len(panelsRaw) == 0 {
+		err = errors.New("panels parameter must be a non-empty array")
+		return uid, err
+	}
+	var panels []PanelQueryConfig
+	panels, err = s.parsePanelConfigs(panelsRaw)
+	if err != nil {
+		return uid, err
+	}
+	uid, err = s.grafanaClient.CreateDashboardFromQueries(ctx, title, panels, folderUID, versionNote)
+	return uid, err
 }
 
 // executeGrafanaUpdateDashboard updates an existing dashboard.

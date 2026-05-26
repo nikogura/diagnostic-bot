@@ -158,6 +158,8 @@ func writeGrafanaToolUsage(builder *strings.Builder) {
 	builder.WriteString("- `grafana_create_dashboard`: Create a new Grafana dashboard (supports postgres, mysql, prometheus, cloudwatch, and infinity datasources)\n")
 	builder.WriteString("- `grafana_update_dashboard`: Update an existing Grafana dashboard (replaces the full model)\n")
 	builder.WriteString("- `grafana_patch_dashboard`: Patch a Grafana dashboard server-side (RFC 7386 merge-patch or RFC 6902 JSON Patch); avoids round-tripping the full model for small edits\n")
+	builder.WriteString("- `grafana_get_dashboard_version`: List a dashboard's version history (omit `version`) or fetch a specific saved version with full payload (supply `version`)\n")
+	builder.WriteString("- `grafana_restore_dashboard_version`: Restore a dashboard to a previous version\n")
 	builder.WriteString("- `grafana_delete_dashboard`: Delete a Grafana dashboard\n")
 	builder.WriteString("- `grafana_create_folder`: Create a Grafana folder (directory) for grouping dashboards. Accepts title (required), uid (optional), parentUid (optional, for nested folders).\n\n")
 }

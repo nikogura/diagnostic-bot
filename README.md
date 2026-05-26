@@ -255,9 +255,11 @@ When `CLOUDWATCH_ACCOUNTS` is configured with multiple accounts, the `accounts` 
 **Grafana** — requires `GRAFANA_URL` + `GRAFANA_API_KEY`. Write operations stamp every change with an audit user (resolved at MCP server startup) and an LLM-supplied intention. See [Grafana audit attribution](#grafana-audit-attribution):
 - `grafana_list_dashboards` — List all Grafana dashboards
 - `grafana_get_dashboard` — Get a specific dashboard by UID
-- `grafana_create_dashboard` — Create a new dashboard from queries. Accepts an optional `message` (the intention) that is composed with the audit user into Grafana's version history.
+- `grafana_create_dashboard` — Create a new dashboard. Two modes: pass `panels` (typed builder, convenient for SQL / Prometheus / CloudWatch / Infinity datasources) or `dashboard` (raw JSON object, required for Elasticsearch/OpenSearch and any datasource whose target fields the typed builder doesn't model — e.g. `metrics`, `bucketAggs`, `timeField`). Supply exactly one. Accepts an optional `message` (the intention) that is composed with the audit user into Grafana's version history.
 - `grafana_update_dashboard` — Update an existing dashboard. Accepts `message`; same composition as create. Replaces the full model.
 - `grafana_patch_dashboard` — Patch a dashboard server-side without round-tripping the full model. Caller supplies `uid` plus exactly one of `merge` (RFC 7386 JSON merge-patch object) or `patches` (RFC 6902 JSON Patch op list). The bot fetches the dashboard losslessly, applies the patch in-memory, and POSTs the result. Use this for small edits on large dashboards (52KB+) to cut token cost and eliminate the transcription-risk surface of re-typing the full payload. Accepts `message`.
+- `grafana_get_dashboard_version` — Dashboard version history. With `uid` only, lists all versions. With `uid` and `version`, fetches that specific version's full payload. Optional `limit`/`start` for list pagination. Response is returned verbatim (lossless), same contract as `grafana_get_dashboard`.
+- `grafana_restore_dashboard_version` — Restore a dashboard to a previous `version`. Grafana stamps the new version with "Restored from version N" itself; the audit-attribution convention applied to other writes is intentionally not applied here (restore is by definition a revert to a known prior state, and the version history is the audit). The bot records the restore in slog with `audit_user` and `audit_source_ip` for forensic purposes.
 - `grafana_delete_dashboard` — Delete a dashboard. Accepts `message`; recorded in slog only (Grafana DELETE has no version history).
 - `grafana_create_folder` — Create a folder (directory). Accepts `message`; recorded in slog only.
 
@@ -469,7 +471,7 @@ The bot uses Claude Code CLI with a custom MCP (Model Context Protocol) server t
 | Loki (Logging) | `LOKI_ENDPOINT` (multi-tenant: `LOKI_DEFAULT_ORG_ID`, optional `LOKI_ORG_IDS`) | `query_loki` |
 | CloudWatch Logs | `CLOUDWATCH_ACCOUNTS` or `CLOUDWATCH_ASSUME_ROLE` | `cloudwatch_logs_query`, `cloudwatch_logs_list_groups`, `cloudwatch_logs_get_events` |
 | Prometheus | `PROMETHEUS_URL` or `PROMETHEUS_<NAME>_URL` | `prometheus_query`, `prometheus_query_range`, `prometheus_series`, `prometheus_label_values`, `prometheus_list_endpoints` |
-| Grafana | `GRAFANA_URL` + `GRAFANA_API_KEY` (optional: `MCP_AUDIT_USER` for write attribution) | `grafana_list_dashboards`, `grafana_get_dashboard`, `grafana_create_dashboard`, `grafana_update_dashboard`, `grafana_patch_dashboard`, `grafana_delete_dashboard`, `grafana_create_folder` |
+| Grafana | `GRAFANA_URL` + `GRAFANA_API_KEY` (optional: `MCP_AUDIT_USER` for write attribution) | `grafana_list_dashboards`, `grafana_get_dashboard`, `grafana_create_dashboard`, `grafana_update_dashboard`, `grafana_patch_dashboard`, `grafana_delete_dashboard`, `grafana_create_folder`, `grafana_get_dashboard_version`, `grafana_restore_dashboard_version` |
 | Database | `DATABASE_URL` or `DATABASE_<NAME>_URL` | `database_query`, `database_list` |
 | GitHub | `GITHUB_TOKEN` | `github_get_file`, `github_list_directory`, `github_search_code` |
 | ECR | `AWS_REGION` or `AWS_DEFAULT_REGION` | `ecr_scan_results` |

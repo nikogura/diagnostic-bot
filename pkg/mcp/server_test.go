@@ -1450,3 +1450,312 @@ func TestExecuteGrafanaPatchDashboardLogsAuditFields(t *testing.T) {
 	require.Contains(t, out, `"audit_source_ip":"10.0.1.5"`)
 	require.Contains(t, out, `"message":"alice: cleanup"`)
 }
+
+// TestExecuteGrafanaGetDashboardVersionListsWhenVersionOmitted verifies the
+// list mode: no `version` arg → bot hits /versions, returns the raw array.
+func TestExecuteGrafanaGetDashboardVersionListsWhenVersionOmitted(t *testing.T) {
+	t.Parallel()
+	logger := slog.New(slog.NewJSONHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError}))
+
+	listBody := `[
+		{"id": 11, "version": 7, "created": "2026-05-26T12:00:00Z", "createdBy": "alice", "message": "alice: rate normalization"},
+		{"id": 10, "version": 6, "created": "2026-05-20T08:00:00Z", "createdBy": "bob", "message": "bob: cleanup"}
+	]`
+
+	var capturedPath, capturedQuery string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		capturedPath = r.URL.Path
+		capturedQuery = r.URL.RawQuery
+		_, _ = w.Write([]byte(listBody))
+	}))
+	t.Cleanup(server.Close)
+
+	grafanaClient, err := NewGrafanaClient(server.URL, "test-key", logger)
+	require.NoError(t, err)
+	mcpServer := NewServer(nil, "", nil, logger)
+	mcpServer.grafanaClient = grafanaClient
+
+	out, err := mcpServer.executeGrafanaGetDashboardVersion(t.Context(), map[string]interface{}{
+		"uid": "dash-uid",
+	})
+	require.NoError(t, err)
+	require.Equal(t, "/api/dashboards/uid/dash-uid/versions", capturedPath)
+	require.Empty(t, capturedQuery, "no limit/start → no query params")
+	// Response is returned verbatim — verify the version metadata round-trips
+	// by parsing rather than depending on the fixture's whitespace.
+	var parsed []map[string]interface{}
+	require.NoError(t, json.Unmarshal([]byte(out), &parsed))
+	require.Len(t, parsed, 2)
+	require.EqualValues(t, 7, parsed[0]["version"])
+	require.Equal(t, "alice", parsed[0]["createdBy"])
+	require.EqualValues(t, 6, parsed[1]["version"])
+}
+
+// TestExecuteGrafanaGetDashboardVersionForwardsLimitAndStart verifies the
+// optional pagination params are forwarded to Grafana.
+func TestExecuteGrafanaGetDashboardVersionForwardsLimitAndStart(t *testing.T) {
+	t.Parallel()
+	logger := slog.New(slog.NewJSONHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError}))
+
+	var capturedQuery string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		capturedQuery = r.URL.RawQuery
+		_, _ = w.Write([]byte(`[]`))
+	}))
+	t.Cleanup(server.Close)
+
+	grafanaClient, err := NewGrafanaClient(server.URL, "test-key", logger)
+	require.NoError(t, err)
+	mcpServer := NewServer(nil, "", nil, logger)
+	mcpServer.grafanaClient = grafanaClient
+
+	_, err = mcpServer.executeGrafanaGetDashboardVersion(t.Context(), map[string]interface{}{
+		"uid":   "dash-uid",
+		"limit": float64(50),
+		"start": float64(10),
+	})
+	require.NoError(t, err)
+	require.Contains(t, capturedQuery, "limit=50")
+	require.Contains(t, capturedQuery, "start=10")
+}
+
+// TestExecuteGrafanaGetDashboardVersionFetchesSpecificVersion verifies the
+// single-version mode preserves the raw response (including the full
+// dashboard `data` payload) so the LLM gets every Grafana field intact —
+// same lossless contract as grafana_get_dashboard.
+func TestExecuteGrafanaGetDashboardVersionFetchesSpecificVersion(t *testing.T) {
+	t.Parallel()
+	logger := slog.New(slog.NewJSONHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError}))
+
+	// Includes unmodeled CloudWatch target fields the typed structs would strip.
+	versionBody := `{
+		"id": 11,
+		"dashboardId": 1,
+		"version": 7,
+		"message": "alice: rate normalization",
+		"data": {
+			"uid": "dash-uid",
+			"title": "Services",
+			"panels": [{"id": 4, "targets": [{"refId": "A", "expression": "m1/60", "period": "60", "accountId": "111122223333"}]}]
+		}
+	}`
+
+	var capturedPath string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		capturedPath = r.URL.Path
+		_, _ = w.Write([]byte(versionBody))
+	}))
+	t.Cleanup(server.Close)
+
+	grafanaClient, err := NewGrafanaClient(server.URL, "test-key", logger)
+	require.NoError(t, err)
+	mcpServer := NewServer(nil, "", nil, logger)
+	mcpServer.grafanaClient = grafanaClient
+
+	out, err := mcpServer.executeGrafanaGetDashboardVersion(t.Context(), map[string]interface{}{
+		"uid":     "dash-uid",
+		"version": float64(7),
+	})
+	require.NoError(t, err)
+	require.Equal(t, "/api/dashboards/uid/dash-uid/versions/7", capturedPath)
+	for _, marker := range []string{`"expression"`, `"m1/60"`, `"period"`, `"accountId"`, `"111122223333"`} {
+		require.Contains(t, out, marker, "single-version fetch must preserve unmodeled field %s", marker)
+	}
+}
+
+// TestExecuteGrafanaRestoreDashboardVersionPostsCorrectBody verifies the
+// restore tool hits POST /restore with the version int in the body — and
+// only the version int, since Grafana's restore endpoint doesn't accept a
+// custom message (it stamps "Restored from version N" itself).
+func TestExecuteGrafanaRestoreDashboardVersionPostsCorrectBody(t *testing.T) {
+	t.Parallel()
+	logger := slog.New(slog.NewJSONHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError}))
+
+	var capturedPath, capturedBody string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		capturedPath = r.URL.Path
+		b, _ := io.ReadAll(r.Body)
+		capturedBody = string(b)
+		_, _ = w.Write([]byte(`{"slug":"services","status":"success","version":8,"uid":"dash-uid"}`))
+	}))
+	t.Cleanup(server.Close)
+
+	grafanaClient, err := NewGrafanaClient(server.URL, "test-key", logger)
+	require.NoError(t, err)
+	mcpServer := NewServer(nil, "", nil, logger)
+	mcpServer.grafanaClient = grafanaClient
+
+	out, err := mcpServer.executeGrafanaRestoreDashboardVersion(t.Context(), map[string]interface{}{
+		"uid":     "dash-uid",
+		"version": float64(7),
+	})
+	require.NoError(t, err)
+	require.Equal(t, "/api/dashboards/uid/dash-uid/restore", capturedPath)
+	require.JSONEq(t, `{"version":7}`, capturedBody)
+	require.Contains(t, out, "dash-uid")
+}
+
+// TestExecuteGrafanaRestoreDashboardVersionLogsForensicLine verifies that
+// even though Grafana's own version-history note is "Restored from version
+// N" (we don't override it), the bot still emits a slog INFO with
+// audit_user/audit_source_ip so the bot-side audit trail captures who
+// initiated the restore.
+func TestExecuteGrafanaRestoreDashboardVersionLogsForensicLine(t *testing.T) {
+	t.Setenv("MCP_AUDIT_USER", "alice")
+
+	var buf bytes.Buffer
+	logger := slog.New(slog.NewJSONHandler(&buf, &slog.HandlerOptions{Level: slog.LevelInfo}))
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(`{"slug":"services","status":"success","version":8,"uid":"dash-uid"}`))
+	}))
+	t.Cleanup(server.Close)
+
+	grafanaClient, err := NewGrafanaClient(server.URL, "test-key", logger)
+	require.NoError(t, err)
+	mcpServer := NewServer(nil, "", nil, logger)
+	mcpServer.grafanaClient = grafanaClient
+
+	ctx := WithAuditSourceIP(t.Context(), "10.0.1.5")
+	_, err = mcpServer.executeGrafanaRestoreDashboardVersion(ctx, map[string]interface{}{
+		"uid":     "dash-uid",
+		"version": float64(7),
+	})
+	require.NoError(t, err)
+
+	out := buf.String()
+	require.Contains(t, out, `"tool":"grafana_restore_dashboard_version"`)
+	require.Contains(t, out, `"audit_user":"alice"`)
+	require.Contains(t, out, `"audit_source_ip":"10.0.1.5"`)
+	require.Contains(t, out, `"restored_version":7`)
+}
+
+// TestExecuteGrafanaCreateDashboardRawPreservesElasticsearchFields is the
+// regression guard for issue #17: an Elasticsearch dashboard created via
+// the raw `dashboard` arg (alternative to `panels`) must reach Grafana
+// with metrics/bucketAggs/timeField/alias intact. The typed builder path
+// can't express those fields, so the raw mode is the supported way.
+func TestExecuteGrafanaCreateDashboardRawPreservesElasticsearchFields(t *testing.T) {
+	t.Setenv("MCP_AUDIT_USER", "alice")
+	logger := slog.New(slog.NewJSONHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError}))
+
+	var capturedBody string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodPost && r.URL.Path == "/api/dashboards/db" {
+			b, _ := io.ReadAll(r.Body)
+			capturedBody = string(b)
+		}
+		_, _ = w.Write([]byte(`{"id":1,"uid":"es-dash","status":"success","version":1,"url":"/d/es-dash/elasticsearch-health"}`))
+	}))
+	t.Cleanup(server.Close)
+
+	grafanaClient, err := NewGrafanaClient(server.URL, "test-key", logger)
+	require.NoError(t, err)
+	mcpServer := NewServer(nil, "", nil, logger)
+	mcpServer.grafanaClient = grafanaClient
+
+	args := map[string]interface{}{
+		"title":   "Elasticsearch Health",
+		"message": "initial create with ES target",
+		"dashboard": map[string]interface{}{
+			"title": "Elasticsearch Health",
+			"panels": []interface{}{
+				map[string]interface{}{
+					"id":    1,
+					"type":  "timeseries",
+					"title": "Errors by service",
+					"targets": []interface{}{
+						map[string]interface{}{
+							"refId":     "A",
+							"timeField": "@timestamp",
+							"alias":     "{{service}}",
+							"metrics": []interface{}{
+								map[string]interface{}{"id": "1", "type": "count"},
+							},
+							"bucketAggs": []interface{}{
+								map[string]interface{}{
+									"id":       "2",
+									"type":     "terms",
+									"field":    "service",
+									"settings": map[string]interface{}{"size": "10"},
+								},
+								map[string]interface{}{
+									"id":       "3",
+									"type":     "date_histogram",
+									"field":    "@timestamp",
+									"settings": map[string]interface{}{"interval": "auto"},
+								},
+							},
+						},
+					},
+				},
+			},
+		},
+	}
+
+	_, err = mcpServer.executeGrafanaCreateDashboard(t.Context(), args)
+	require.NoError(t, err)
+
+	for _, marker := range []string{
+		`"metrics"`,
+		`"bucketAggs"`,
+		`"timeField":"@timestamp"`,
+		`"alias":"{{service}}"`,
+		`"type":"date_histogram"`,
+		`"type":"terms"`,
+		`"interval":"auto"`,
+	} {
+		require.Contains(t, capturedBody, marker, "ES field %s must survive raw create", marker)
+	}
+	require.Contains(t, capturedBody, `"message":"alice: initial create with ES target"`, "audit attribution must land in version note for the create-raw path")
+	require.NotContains(t, capturedBody, `"Auto-generated dashboard:"`)
+}
+
+// TestExecuteGrafanaCreateDashboardRejectsBothPanelsAndDashboard verifies
+// the schema invariant: the LLM picks exactly one creation mode.
+func TestExecuteGrafanaCreateDashboardRejectsBothPanelsAndDashboard(t *testing.T) {
+	t.Parallel()
+	logger := slog.New(slog.NewJSONHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError}))
+	mcpServer := NewServer(nil, "", nil, logger)
+	mcpServer.grafanaClient = &GrafanaClient{logger: logger}
+
+	_, err := mcpServer.executeGrafanaCreateDashboard(t.Context(), map[string]interface{}{
+		"title":     "ambiguous",
+		"panels":    []interface{}{map[string]interface{}{"title": "p", "panelType": "stat", "datasourceUID": "ds"}},
+		"dashboard": map[string]interface{}{"title": "different"},
+	})
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "panels")
+	require.Contains(t, err.Error(), "dashboard")
+}
+
+// TestExecuteGrafanaCreateDashboardRequiresOneCreationMode verifies that
+// at least one of panels or dashboard must be present.
+func TestExecuteGrafanaCreateDashboardRequiresOneCreationMode(t *testing.T) {
+	t.Parallel()
+	logger := slog.New(slog.NewJSONHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError}))
+	mcpServer := NewServer(nil, "", nil, logger)
+	mcpServer.grafanaClient = &GrafanaClient{logger: logger}
+
+	_, err := mcpServer.executeGrafanaCreateDashboard(t.Context(), map[string]interface{}{
+		"title": "nothing to build",
+	})
+	require.Error(t, err)
+}
+
+// TestExecuteGrafanaRestoreDashboardVersionRequiresVersion verifies the
+// schema invariant: restore is destructive (creates a new version, can't
+// be UNdone except by another restore), so version is required.
+func TestExecuteGrafanaRestoreDashboardVersionRequiresVersion(t *testing.T) {
+	t.Parallel()
+	logger := slog.New(slog.NewJSONHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError}))
+
+	mcpServer := NewServer(nil, "", nil, logger)
+	mcpServer.grafanaClient = &GrafanaClient{logger: logger}
+
+	_, err := mcpServer.executeGrafanaRestoreDashboardVersion(t.Context(), map[string]interface{}{
+		"uid": "dash-uid",
+	})
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "version")
+}

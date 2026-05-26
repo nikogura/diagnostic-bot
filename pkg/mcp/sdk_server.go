@@ -194,13 +194,15 @@ func (s *SDKServer) registerGrafanaTools() {
 	}
 
 	handlers := map[string]func(context.Context, map[string]interface{}) (string, error){
-		toolGrafanaListDashboards:  s.legacy.executeGrafanaListDashboards,
-		toolGrafanaGetDashboard:    s.legacy.executeGrafanaGetDashboard,
-		toolGrafanaCreateDashboard: s.legacy.executeGrafanaCreateDashboard,
-		toolGrafanaUpdateDashboard: s.legacy.executeGrafanaUpdateDashboard,
-		toolGrafanaPatchDashboard:  s.legacy.executeGrafanaPatchDashboard,
-		toolGrafanaDeleteDashboard: s.legacy.executeGrafanaDeleteDashboard,
-		toolGrafanaCreateFolder:    s.legacy.executeGrafanaCreateFolder,
+		toolGrafanaListDashboards:          s.legacy.executeGrafanaListDashboards,
+		toolGrafanaGetDashboard:            s.legacy.executeGrafanaGetDashboard,
+		toolGrafanaCreateDashboard:         s.legacy.executeGrafanaCreateDashboard,
+		toolGrafanaUpdateDashboard:         s.legacy.executeGrafanaUpdateDashboard,
+		toolGrafanaPatchDashboard:          s.legacy.executeGrafanaPatchDashboard,
+		toolGrafanaDeleteDashboard:         s.legacy.executeGrafanaDeleteDashboard,
+		toolGrafanaCreateFolder:            s.legacy.executeGrafanaCreateFolder,
+		toolGrafanaGetDashboardVersion:     s.legacy.executeGrafanaGetDashboardVersion,
+		toolGrafanaRestoreDashboardVersion: s.legacy.executeGrafanaRestoreDashboardVersion,
 	}
 
 	for _, t := range getGrafanaTools() {
