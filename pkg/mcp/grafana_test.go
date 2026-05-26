@@ -207,7 +207,7 @@ func TestGrafanaClientGetDashboard(t *testing.T) {
 			} else {
 				require.NoError(t, err)
 				require.NotNil(t, resp)
-				assert.Equal(t, tt.expectedTitle, resp.Dashboard.Title)
+				assert.Equal(t, tt.expectedTitle, resp.Title)
 				assert.Equal(t, "test-folder", resp.FolderUID)
 			}
 		})
@@ -301,13 +301,10 @@ func TestGrafanaClientUpdateDashboard(t *testing.T) {
 	logger := slog.New(slog.NewTextHandler(os.Stdout, nil))
 	ctx := context.Background()
 
-	dashboard := &Dashboard{
-		UID:   "test-uid",
-		Title: "Updated Dashboard",
-		Panels: []Panel{
-			{ID: 1, Type: "stat", Title: "Panel 1"},
-		},
-	}
+	// Raw bytes mirror what executeGrafanaUpdateDashboard now sends — the
+	// caller's dashboard payload marshaled directly, with no typed
+	// round-trip in between.
+	dashboardBytes := []byte(`{"uid":"test-uid","title":"Updated Dashboard","panels":[{"id":1,"type":"stat","title":"Panel 1"}]}`)
 
 	tests := []struct {
 		name           string
@@ -347,11 +344,12 @@ func TestGrafanaClientUpdateDashboard(t *testing.T) {
 				assert.Equal(t, "/api/dashboards/db", r.URL.Path)
 				assert.Equal(t, http.MethodPost, r.Method)
 
-				// Verify request body includes folderUid
-				var req DashboardSaveRequest
+				// Verify request body: dashboard bytes reach Grafana
+				// verbatim, overwrite is set, folderUid round-trips.
+				var req dashboardSaveRequestRaw
 				err := json.NewDecoder(r.Body).Decode(&req)
 				assert.NoError(t, err)
-				assert.Equal(t, dashboard.Title, req.Dashboard.Title)
+				assert.JSONEq(t, string(dashboardBytes), string(req.Dashboard))
 				assert.True(t, req.Overwrite)
 				assert.Equal(t, tt.folderUID, req.FolderUID)
 
@@ -363,7 +361,7 @@ func TestGrafanaClientUpdateDashboard(t *testing.T) {
 			client, err := NewGrafanaClient(server.URL, "test-api-key", logger)
 			require.NoError(t, err)
 
-			err = client.UpdateDashboard(ctx, dashboard, tt.folderUID, "Test update")
+			err = client.UpdateDashboard(ctx, dashboardBytes, tt.folderUID, "Test update")
 
 			if tt.expectErr {
 				require.Error(t, err)

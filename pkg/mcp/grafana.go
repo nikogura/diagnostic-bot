@@ -120,13 +120,23 @@ type InfinityColumn struct {
 	Type     string `json:"type"` // "string", "number", "timestamp", "timestamp_epoch"
 }
 
-// DashboardGetResponse wraps a dashboard with metadata from the Grafana API response.
+// DashboardGetResponse wraps a dashboard with metadata from the Grafana API
+// response. Dashboard is held as raw JSON, not the typed Dashboard struct,
+// because Grafana dashboards contain many fields the typed model doesn't
+// cover (panel expression/period/accountId, target legendFormat, top-level
+// annotations/refresh/timepicker/variables, etc.). Unmarshaling into the
+// typed struct silently dropped all of them, and re-marshaling for the
+// update path then degraded the panel on every edit. Title is peeked out
+// of the raw bytes for logging convenience.
 type DashboardGetResponse struct {
-	Dashboard *Dashboard
+	Dashboard json.RawMessage
+	Title     string
 	FolderUID string
 }
 
-// DashboardSaveRequest represents the request to save a dashboard.
+// DashboardSaveRequest represents the request to save a dashboard from the
+// typed-build path (create). The update path uses dashboardSaveRequestRaw
+// instead, to keep unmodeled fields intact.
 type DashboardSaveRequest struct {
 	Dashboard Dashboard `json:"dashboard"`
 	Message   string    `json:"message,omitempty"`
@@ -256,8 +266,10 @@ func (c *GrafanaClient) GetDashboard(ctx context.Context, uid string) (result *D
 		return result, err
 	}
 
+	// Capture the dashboard sub-object verbatim. Any decoding into a typed
+	// struct here would strip every field the model doesn't cover.
 	var response struct {
-		Dashboard Dashboard `json:"dashboard"`
+		Dashboard json.RawMessage `json:"dashboard"`
 		Meta      struct {
 			Version   int    `json:"version"`
 			Slug      string `json:"slug"`
@@ -271,12 +283,21 @@ func (c *GrafanaClient) GetDashboard(ctx context.Context, uid string) (result *D
 		return result, err
 	}
 
+	// Peek at the title for log/metadata purposes without committing to the
+	// full typed unmarshal; best-effort, an unrelated decode error here
+	// shouldn't fail the request.
+	var titlePeek struct {
+		Title string `json:"title"`
+	}
+	_ = json.Unmarshal(response.Dashboard, &titlePeek)
+
 	result = &DashboardGetResponse{
-		Dashboard: &response.Dashboard,
+		Dashboard: response.Dashboard,
+		Title:     titlePeek.Title,
 		FolderUID: response.Meta.FolderUID,
 	}
 
-	c.logger.InfoContext(ctx, "retrieved dashboard", "uid", uid, "title", result.Dashboard.Title, "folderUid", result.FolderUID)
+	c.logger.InfoContext(ctx, "retrieved dashboard", "uid", uid, "title", result.Title, "folderUid", result.FolderUID)
 	return result, err
 }
 
@@ -324,10 +345,22 @@ func (c *GrafanaClient) CreateDashboard(ctx context.Context, dashboard *Dashboar
 	return uid, err
 }
 
-// UpdateDashboard updates an existing dashboard, preserving its folder placement.
-func (c *GrafanaClient) UpdateDashboard(ctx context.Context, dashboard *Dashboard, folderUID string, message string) (err error) {
-	request := DashboardSaveRequest{
-		Dashboard: *dashboard,
+// dashboardSaveRequestRaw is the update-path wire shape. Dashboard is held
+// as raw JSON so unmodeled fields the caller supplied (panel expression,
+// period, accountId, annotations, refresh, etc.) reach Grafana intact.
+type dashboardSaveRequestRaw struct {
+	Dashboard json.RawMessage `json:"dashboard"`
+	Message   string          `json:"message,omitempty"`
+	Overwrite bool            `json:"overwrite"`
+	FolderUID string          `json:"folderUid,omitempty"`
+}
+
+// UpdateDashboard updates an existing dashboard, preserving its folder
+// placement. The dashboard payload is opaque on this path — callers send
+// raw JSON bytes so any unmodeled fields (which is most of them) survive.
+func (c *GrafanaClient) UpdateDashboard(ctx context.Context, dashboard json.RawMessage, folderUID, message string) (err error) {
+	request := dashboardSaveRequestRaw{
+		Dashboard: dashboard,
 		Message:   message,
 		Overwrite: true,
 		FolderUID: folderUID,
@@ -339,9 +372,17 @@ func (c *GrafanaClient) UpdateDashboard(ctx context.Context, dashboard *Dashboar
 		return err
 	}
 
+	// uid/title for this log line are best-effort peeks from the raw bytes.
+	// Authoritative audit (uid, title, audit_user, source_ip, intention)
+	// is emitted by the MCP executor that called this method.
+	var peek struct {
+		UID   string `json:"uid"`
+		Title string `json:"title"`
+	}
+	_ = json.Unmarshal(dashboard, &peek)
 	c.logger.InfoContext(ctx, "updated dashboard",
-		"uid", dashboard.UID,
-		"title", dashboard.Title,
+		"uid", peek.UID,
+		"title", peek.Title,
 		"folderUid", folderUID,
 	)
 	return err

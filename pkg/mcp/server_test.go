@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"io"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
@@ -1001,6 +1002,205 @@ func TestExecuteGrafanaCreateFolderLogsAuditUserAndIntention(t *testing.T) {
 	require.Contains(t, logOutput, `"message":"alice: grouping ops dashboards"`)
 	require.Contains(t, logOutput, `"tool":"grafana_create_folder"`)
 	require.Contains(t, logOutput, `"audit_source_ip":"stdio"`)
+}
+
+// TestExecuteGrafanaGetDashboardEmitsUnmodeledFields is the regression
+// guard for the lossy-typed-unmarshal bug: Grafana panel/target fields
+// the bot's structs don't model (expression, period, accountId,
+// matchExact, legendFormat, etc.) must survive a GET intact. Before the
+// fix, GetDashboard unmarshaled into a closed Dashboard{} and dropped
+// everything unmodeled, which silently degraded any non-trivial panel
+// on every grafana_update_dashboard cycle.
+func TestExecuteGrafanaGetDashboardEmitsUnmodeledFields(t *testing.T) {
+	t.Parallel()
+	logger := slog.New(slog.NewJSONHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError}))
+
+	// Fixture contains a CloudWatch math-expression target with fields the
+	// Target struct doesn't model. The test fails closed: any of these
+	// strings missing from the executor output means data loss.
+	fixture := `{
+		"dashboard": {
+			"uid": "dash-uid",
+			"title": "Services",
+			"panels": [{
+				"id": 4,
+				"type": "timeseries",
+				"title": "Request Rate",
+				"targets": [{
+					"refId": "A",
+					"datasource": {"type": "cloudwatch", "uid": "cw-prod"},
+					"namespace": "AWS/ApplicationELB",
+					"metricName": "RequestCount",
+					"statistic": "Sum",
+					"period": "60",
+					"accountId": "111122223333",
+					"matchExact": false,
+					"dimensions": {"LoadBalancer": "app/prod"},
+					"id": "m1"
+				}, {
+					"refId": "B",
+					"datasource": {"type": "cloudwatch", "uid": "cw-prod"},
+					"expression": "m1/60",
+					"label": "RPS",
+					"id": "rps"
+				}]
+			}],
+			"annotations": {"list": [{"name": "deploys"}]},
+			"refresh": "30s"
+		},
+		"meta": {"folderUid": "ops", "version": 7}
+	}`
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(fixture))
+	}))
+	t.Cleanup(server.Close)
+
+	grafanaClient, err := NewGrafanaClient(server.URL, "test-key", logger)
+	require.NoError(t, err)
+	mcpServer := NewServer(nil, "", nil, logger)
+	mcpServer.grafanaClient = grafanaClient
+
+	out, err := mcpServer.executeGrafanaGetDashboard(t.Context(), map[string]interface{}{"uid": "dash-uid"})
+	require.NoError(t, err)
+
+	// Every one of these is unmodeled in the typed structs. Their absence
+	// from the executor's output is the bug.
+	for _, marker := range []string{
+		`"expression"`,
+		`"period"`,
+		`"accountId"`,
+		`"matchExact"`,
+		`"label"`,
+		`"id": "m1"`,
+		`"id": "rps"`,
+		`"annotations"`,
+		`"refresh"`,
+		`"m1/60"`,
+	} {
+		require.Contains(t, out, marker, "Grafana field %s must survive get round-trip", marker)
+	}
+}
+
+// TestExecuteGrafanaUpdateDashboardPreservesUnmodeledFields is the other
+// half of the regression guard: the same fields the get path must
+// preserve on the way in, the update path must preserve on the way out.
+// Captures the POST body Grafana would have received.
+func TestExecuteGrafanaUpdateDashboardPreservesUnmodeledFields(t *testing.T) {
+	t.Setenv("MCP_AUDIT_USER", "alice")
+	logger := slog.New(slog.NewJSONHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError}))
+
+	var capturedBody string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodPost && r.URL.Path == "/api/dashboards/db" {
+			b, _ := io.ReadAll(r.Body)
+			capturedBody = string(b)
+		}
+		_, _ = w.Write([]byte(`{"id":1,"uid":"dash-uid","status":"success","version":2}`))
+	}))
+	t.Cleanup(server.Close)
+
+	grafanaClient, err := NewGrafanaClient(server.URL, "test-key", logger)
+	require.NoError(t, err)
+	mcpServer := NewServer(nil, "", nil, logger)
+	mcpServer.grafanaClient = grafanaClient
+
+	// Dashboard payload with fields the typed structs would silently
+	// strip. The pre-fix code unmarshaled this into Dashboard{} and
+	// re-marshaled it, dropping every entry below.
+	args := map[string]interface{}{
+		"uid":       "dash-uid",
+		"folderUid": "ops",
+		"message":   "rate normalization",
+		"dashboard": map[string]interface{}{
+			"title": "Services",
+			"panels": []interface{}{
+				map[string]interface{}{
+					"id":    4,
+					"type":  "timeseries",
+					"title": "Request Rate",
+					"targets": []interface{}{
+						map[string]interface{}{
+							"refId":      "A",
+							"datasource": map[string]interface{}{"type": "cloudwatch", "uid": "cw-prod"},
+							"namespace":  "AWS/ApplicationELB",
+							"metricName": "RequestCount",
+							"statistic":  "Sum",
+							"period":     "60",
+							"accountId":  "111122223333",
+							"matchExact": false,
+							"id":         "m1",
+						},
+						map[string]interface{}{
+							"refId":      "B",
+							"expression": "m1/60",
+							"label":      "RPS",
+							"id":         "rps",
+						},
+					},
+				},
+			},
+			"annotations": map[string]interface{}{"list": []interface{}{map[string]interface{}{"name": "deploys"}}},
+			"refresh":     "30s",
+		},
+	}
+
+	_, err = mcpServer.executeGrafanaUpdateDashboard(t.Context(), args)
+	require.NoError(t, err)
+
+	for _, marker := range []string{
+		`"expression":"m1/60"`,
+		`"period":"60"`,
+		`"accountId":"111122223333"`,
+		`"matchExact":false`,
+		`"label":"RPS"`,
+		`"id":"m1"`,
+		`"id":"rps"`,
+		`"annotations"`,
+		`"refresh":"30s"`,
+	} {
+		require.Contains(t, capturedBody, marker, "Grafana field %s must reach the server verbatim", marker)
+	}
+
+	require.Contains(t, capturedBody, `"message":"alice: rate normalization"`, "audit attribution must still land in the version note")
+	require.Contains(t, capturedBody, `"overwrite":true`, "update path must always overwrite")
+}
+
+// TestExecuteGrafanaUpdateDashboardInjectsUID verifies the bot still
+// honors the contract that args.uid is the source of truth for which
+// dashboard gets updated, even when the LLM's dashboard payload lacks a
+// uid (or has a stale one). The injected uid must reach the wire.
+func TestExecuteGrafanaUpdateDashboardInjectsUID(t *testing.T) {
+	t.Setenv("MCP_AUDIT_USER", "alice")
+	logger := slog.New(slog.NewJSONHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError}))
+
+	var capturedBody string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodPost && r.URL.Path == "/api/dashboards/db" {
+			b, _ := io.ReadAll(r.Body)
+			capturedBody = string(b)
+		}
+		_, _ = w.Write([]byte(`{"id":1,"uid":"target-uid","status":"success","version":2}`))
+	}))
+	t.Cleanup(server.Close)
+
+	grafanaClient, err := NewGrafanaClient(server.URL, "test-key", logger)
+	require.NoError(t, err)
+	mcpServer := NewServer(nil, "", nil, logger)
+	mcpServer.grafanaClient = grafanaClient
+
+	args := map[string]interface{}{
+		"uid":       "target-uid",
+		"folderUid": "ops",
+		"dashboard": map[string]interface{}{
+			// Deliberately no uid field. The executor must inject "target-uid".
+			"title":  "Services",
+			"panels": []interface{}{},
+		},
+	}
+	_, err = mcpServer.executeGrafanaUpdateDashboard(t.Context(), args)
+	require.NoError(t, err)
+	require.Contains(t, capturedBody, `"uid":"target-uid"`, "args.uid must be injected into the dashboard payload before POST")
 }
 
 // TestExecuteGrafanaDeleteDashboardLogsHTTPSourceIP verifies the HTTP/SSE

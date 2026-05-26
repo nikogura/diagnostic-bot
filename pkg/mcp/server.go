@@ -1658,7 +1658,16 @@ func (s *Server) executeGrafanaUpdateDashboard(ctx context.Context, args map[str
 		folderUID = existing.FolderUID
 	}
 
-	// Convert the dashboard map to Dashboard struct
+	// args.uid is the source of truth for which dashboard to update — it
+	// trumps whatever (or no) uid the LLM put into the dashboard payload.
+	dashboardRaw["uid"] = uid
+	title, _ := dashboardRaw["title"].(string)
+
+	// Marshal the raw map directly. We deliberately do NOT round-trip
+	// through the typed Dashboard{}: every field the model doesn't cover
+	// (panel expression/period/accountId, target legendFormat,
+	// annotations, refresh, variables, etc.) would silently disappear,
+	// degrading the panel on every edit.
 	var dashboardBytes []byte
 	dashboardBytes, err = json.Marshal(dashboardRaw)
 	if err != nil {
@@ -1666,16 +1675,7 @@ func (s *Server) executeGrafanaUpdateDashboard(ctx context.Context, args map[str
 		return result, err
 	}
 
-	var dashboard Dashboard
-	err = json.Unmarshal(dashboardBytes, &dashboard)
-	if err != nil {
-		err = fmt.Errorf("unmarshaling dashboard: %w", err)
-		return result, err
-	}
-
-	dashboard.UID = uid
-
-	err = s.grafanaClient.UpdateDashboard(ctx, &dashboard, folderUID, versionNote)
+	err = s.grafanaClient.UpdateDashboard(ctx, dashboardBytes, folderUID, versionNote)
 	if err != nil {
 		return result, err
 	}
@@ -1683,7 +1683,7 @@ func (s *Server) executeGrafanaUpdateDashboard(ctx context.Context, args map[str
 	s.logger.InfoContext(ctx, "grafana write",
 		slog.String("tool", toolGrafanaUpdateDashboard),
 		slog.String("uid", uid),
-		slog.String("title", dashboard.Title),
+		slog.String("title", title),
 		slog.String("audit_user", auditUser),
 		slog.String("audit_source_ip", auditSourceFromContext(ctx)),
 		slog.String("message", versionNote),
