@@ -1232,3 +1232,221 @@ func TestExecuteGrafanaDeleteDashboardLogsHTTPSourceIP(t *testing.T) {
 
 	require.Contains(t, buf.String(), `"audit_source_ip":"10.0.1.5"`)
 }
+
+// patchTestFixture is a faithful Grafana GET response with unmodeled
+// CloudWatch fields the patcher must not touch. Shared across the patch
+// tool tests below.
+const patchTestFixture = `{
+	"dashboard": {
+		"uid": "dash-uid",
+		"title": "Services",
+		"panels": [
+			{"id": 4, "title": "RPS", "targets": [{
+				"refId": "A",
+				"namespace": "AWS/ApplicationELB",
+				"metricName": "RequestCount",
+				"statistic": "Sum",
+				"period": "60",
+				"accountId": "111122223333",
+				"matchExact": false,
+				"label": "rps",
+				"id": "m1"
+			}]},
+			{"id": 5, "title": "Errors"}
+		],
+		"time": {"from": "now-3h", "to": "now"},
+		"refresh": "30s"
+	},
+	"meta": {"folderUid": "ops", "version": 7}
+}`
+
+// newPatchTestServer stands up a httptest Grafana that returns the
+// fixture on GET and captures the POST body. Returns the server and a
+// pointer to the captured request body so callers can assert on it.
+func newPatchTestServer(t *testing.T) (server *httptest.Server, captured *string) {
+	t.Helper()
+	var body string
+	captured = &body
+	server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet:
+			_, _ = w.Write([]byte(patchTestFixture))
+		case r.Method == http.MethodPost && r.URL.Path == "/api/dashboards/db":
+			b, _ := io.ReadAll(r.Body)
+			*captured = string(b)
+			_, _ = w.Write([]byte(`{"id":1,"uid":"dash-uid","status":"success","version":8}`))
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	return server, captured
+}
+
+func newPatchTestServerInstance(t *testing.T) (mcpServer *Server, captured *string, cleanup func()) {
+	t.Helper()
+	logger := slog.New(slog.NewJSONHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError}))
+	var server *httptest.Server
+	server, captured = newPatchTestServer(t)
+	cleanup = server.Close
+	grafanaClient, err := NewGrafanaClient(server.URL, "test-key", logger)
+	require.NoError(t, err)
+	mcpServer = NewServer(nil, "", nil, logger)
+	mcpServer.grafanaClient = grafanaClient
+	return mcpServer, captured, cleanup
+}
+
+// TestExecuteGrafanaPatchDashboardMergePatchTouchesOnlyTargetField verifies
+// the merge-patch (RFC 7386) mode changes the targeted nested field and
+// leaves every sibling — including the unmodeled CloudWatch target fields
+// the lossless-get fix preserves — intact.
+func TestExecuteGrafanaPatchDashboardMergePatchTouchesOnlyTargetField(t *testing.T) {
+	t.Setenv("MCP_AUDIT_USER", "alice")
+	mcpServer, captured, cleanup := newPatchTestServerInstance(t)
+	t.Cleanup(cleanup)
+
+	_, err := mcpServer.executeGrafanaPatchDashboard(t.Context(), map[string]interface{}{
+		"uid":     "dash-uid",
+		"message": "narrow default window to 1h",
+		"merge": map[string]interface{}{
+			"time": map[string]interface{}{"from": "now-1h"},
+		},
+	})
+	require.NoError(t, err)
+
+	// Patched field landed.
+	require.Contains(t, *captured, `"from":"now-1h"`)
+	// Sibling field in same parent unchanged.
+	require.Contains(t, *captured, `"to":"now"`)
+	// Unmodeled CloudWatch target fields preserved verbatim.
+	for _, marker := range []string{`"period":"60"`, `"accountId":"111122223333"`, `"matchExact":false`, `"label":"rps"`, `"id":"m1"`} {
+		require.Contains(t, *captured, marker, "merge-patch must not touch field %s", marker)
+	}
+	// Audit attribution lands in the version note.
+	require.Contains(t, *captured, `"message":"alice: narrow default window to 1h"`)
+	// folderUid round-trips from the GET.
+	require.Contains(t, *captured, `"folderUid":"ops"`)
+	require.Contains(t, *captured, `"overwrite":true`)
+}
+
+// TestExecuteGrafanaPatchDashboardJSONPatchReplaceNestedPath verifies the
+// RFC 6902 mode with a single replace op against a nested JSON Pointer
+// path — the simplest "change one field" case.
+func TestExecuteGrafanaPatchDashboardJSONPatchReplaceNestedPath(t *testing.T) {
+	t.Setenv("MCP_AUDIT_USER", "alice")
+	mcpServer, captured, cleanup := newPatchTestServerInstance(t)
+	t.Cleanup(cleanup)
+
+	_, err := mcpServer.executeGrafanaPatchDashboard(t.Context(), map[string]interface{}{
+		"uid": "dash-uid",
+		"patches": []interface{}{
+			map[string]interface{}{"op": "replace", "path": "/time/from", "value": "now-1h"},
+		},
+	})
+	require.NoError(t, err)
+
+	require.Contains(t, *captured, `"from":"now-1h"`)
+	require.Contains(t, *captured, `"to":"now"`)
+	require.Contains(t, *captured, `"period":"60"`, "JSON Patch must not touch unmodeled fields either")
+}
+
+// TestExecuteGrafanaPatchDashboardJSONPatchArrayRemove verifies the
+// surgical array op JSON Patch gives us that merge-patch cannot — removing
+// one element of /panels by index, leaving the rest in place.
+func TestExecuteGrafanaPatchDashboardJSONPatchArrayRemove(t *testing.T) {
+	t.Setenv("MCP_AUDIT_USER", "alice")
+	mcpServer, captured, cleanup := newPatchTestServerInstance(t)
+	t.Cleanup(cleanup)
+
+	_, err := mcpServer.executeGrafanaPatchDashboard(t.Context(), map[string]interface{}{
+		"uid": "dash-uid",
+		"patches": []interface{}{
+			map[string]interface{}{"op": "remove", "path": "/panels/1"},
+		},
+	})
+	require.NoError(t, err)
+
+	require.NotContains(t, *captured, `"title":"Errors"`, "panel at index 1 must be removed")
+	require.Contains(t, *captured, `"title":"RPS"`, "panel at index 0 must remain")
+}
+
+// TestExecuteGrafanaPatchDashboardJSONPatchTestFailureAborts verifies the
+// optimistic-locking primitive: a failed `test` op means we don't write.
+// Captured body remains empty — no POST hit the server.
+func TestExecuteGrafanaPatchDashboardJSONPatchTestFailureAborts(t *testing.T) {
+	t.Setenv("MCP_AUDIT_USER", "alice")
+	mcpServer, captured, cleanup := newPatchTestServerInstance(t)
+	t.Cleanup(cleanup)
+
+	_, err := mcpServer.executeGrafanaPatchDashboard(t.Context(), map[string]interface{}{
+		"uid": "dash-uid",
+		"patches": []interface{}{
+			map[string]interface{}{"op": "test", "path": "/time/from", "value": "now-99h"},
+			map[string]interface{}{"op": "replace", "path": "/time/from", "value": "now-1h"},
+		},
+	})
+	require.Error(t, err)
+	require.Empty(t, *captured, "failed test op must abort before POST")
+}
+
+// TestExecuteGrafanaPatchDashboardRejectsNeitherInput verifies the schema
+// invariant: the LLM must choose merge or patches.
+func TestExecuteGrafanaPatchDashboardRejectsNeitherInput(t *testing.T) {
+	t.Setenv("MCP_AUDIT_USER", "alice")
+	mcpServer, captured, cleanup := newPatchTestServerInstance(t)
+	t.Cleanup(cleanup)
+
+	_, err := mcpServer.executeGrafanaPatchDashboard(t.Context(), map[string]interface{}{
+		"uid": "dash-uid",
+	})
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "merge")
+	require.Contains(t, err.Error(), "patches")
+	require.Empty(t, *captured)
+}
+
+// TestExecuteGrafanaPatchDashboardRejectsBothInputs verifies the schema
+// invariant the other way: not both at once, since the two operate on the
+// same bytes and the resolution order would be unobvious.
+func TestExecuteGrafanaPatchDashboardRejectsBothInputs(t *testing.T) {
+	t.Setenv("MCP_AUDIT_USER", "alice")
+	mcpServer, captured, cleanup := newPatchTestServerInstance(t)
+	t.Cleanup(cleanup)
+
+	_, err := mcpServer.executeGrafanaPatchDashboard(t.Context(), map[string]interface{}{
+		"uid":     "dash-uid",
+		"merge":   map[string]interface{}{"time": map[string]interface{}{"from": "now-1h"}},
+		"patches": []interface{}{map[string]interface{}{"op": "replace", "path": "/time/from", "value": "now-2h"}},
+	})
+	require.Error(t, err)
+	require.Empty(t, *captured)
+}
+
+// TestExecuteGrafanaPatchDashboardLogsAuditFields verifies the slog INFO
+// line for patch carries the same audit fields as the other write tools.
+func TestExecuteGrafanaPatchDashboardLogsAuditFields(t *testing.T) {
+	t.Setenv("MCP_AUDIT_USER", "alice")
+
+	var buf bytes.Buffer
+	logger := slog.New(slog.NewJSONHandler(&buf, &slog.HandlerOptions{Level: slog.LevelInfo}))
+
+	server, _ := newPatchTestServer(t)
+	t.Cleanup(server.Close)
+	grafanaClient, err := NewGrafanaClient(server.URL, "test-key", logger)
+	require.NoError(t, err)
+	mcpServer := NewServer(nil, "", nil, logger)
+	mcpServer.grafanaClient = grafanaClient
+
+	ctx := WithAuditSourceIP(t.Context(), "10.0.1.5")
+	_, err = mcpServer.executeGrafanaPatchDashboard(ctx, map[string]interface{}{
+		"uid":     "dash-uid",
+		"message": "cleanup",
+		"merge":   map[string]interface{}{"time": map[string]interface{}{"from": "now-1h"}},
+	})
+	require.NoError(t, err)
+
+	out := buf.String()
+	require.Contains(t, out, `"tool":"grafana_patch_dashboard"`)
+	require.Contains(t, out, `"audit_user":"alice"`)
+	require.Contains(t, out, `"audit_source_ip":"10.0.1.5"`)
+	require.Contains(t, out, `"message":"alice: cleanup"`)
+}

@@ -13,6 +13,7 @@ import (
 	"path/filepath"
 	"strings"
 
+	jsonpatch "github.com/evanphx/json-patch/v5"
 	"github.com/google/go-github/v57/github"
 	"github.com/nikogura/diagnostic-bot/pkg/apiconfig"
 	"github.com/nikogura/diagnostic-bot/pkg/k8s"
@@ -47,6 +48,7 @@ const (
 	toolGrafanaGetDashboard    = "grafana_get_dashboard"
 	toolGrafanaCreateDashboard = "grafana_create_dashboard"
 	toolGrafanaUpdateDashboard = "grafana_update_dashboard"
+	toolGrafanaPatchDashboard  = "grafana_patch_dashboard"
 	toolGrafanaDeleteDashboard = "grafana_delete_dashboard"
 	toolGrafanaCreateFolder    = "grafana_create_folder"
 	// CloudWatch Logs tools are defined in cloudwatch.go.
@@ -710,6 +712,41 @@ func getGrafanaCreateDashboardTool() (tool MCPTool) {
 	return tool
 }
 
+// getGrafanaPatchDashboardTool returns the schema for the patch tool.
+// Split out so getGrafanaModifyTools stays within funlen.
+func getGrafanaPatchDashboardTool() (tool MCPTool) {
+	tool = MCPTool{
+		Name:        toolGrafanaPatchDashboard,
+		Description: "Patch a Grafana dashboard server-side without round-tripping the full dashboard JSON. Useful for changing one or a few nested fields (e.g. time.from) on large dashboards. The bot fetches the dashboard losslessly, applies the patch in-memory, and POSTs the result back — the caller sends only the diff. Supply exactly one of `merge` (RFC 7386 JSON merge-patch) or `patches` (RFC 6902 JSON Patch operation list).",
+		InputSchema: map[string]interface{}{
+			"type": "object",
+			"properties": map[string]interface{}{
+				"uid": map[string]interface{}{
+					"type":        "string",
+					"description": "Dashboard UID to patch",
+				},
+				"merge": map[string]interface{}{
+					"type":        "object",
+					"description": "RFC 7386 JSON merge-patch object. Recursively merges into the dashboard; null values delete keys. Example: {\"time\": {\"from\": \"now-1h\"}} changes only time.from. Cannot replace one element of an array — use `patches` for surgical array ops. Mutually exclusive with `patches`.",
+				},
+				"patches": map[string]interface{}{
+					"type":        "array",
+					"description": "RFC 6902 JSON Patch operation list. Each op is {op, path, value?, from?}. Supported ops: add, remove, replace, move, copy, test. The `test` op aborts the write on mismatch — use it for optimistic locking. Example: [{\"op\":\"replace\",\"path\":\"/time/from\",\"value\":\"now-1h\"}]. Mutually exclusive with `merge`.",
+					"items": map[string]interface{}{
+						"type": "object",
+					},
+				},
+				"message": map[string]interface{}{
+					"type":        "string",
+					"description": "Short description of why this patch is being applied. Composed with the audit user into Grafana's version history note.",
+				},
+			},
+			"required": []string{"uid"},
+		},
+	}
+	return tool
+}
+
 // getGrafanaModifyTools returns Grafana tools for updating/deleting dashboards.
 func getGrafanaModifyTools() (result []MCPTool) {
 	result = []MCPTool{
@@ -739,6 +776,7 @@ func getGrafanaModifyTools() (result []MCPTool) {
 				"required": []string{"uid", "dashboard"},
 			},
 		},
+		getGrafanaPatchDashboardTool(),
 		{
 			Name:        toolGrafanaDeleteDashboard,
 			Description: "Delete a Grafana dashboard",
@@ -909,6 +947,8 @@ func (s *Server) dispatchToolCall(ctx context.Context, toolName string, args map
 		result, err = s.executeGrafanaCreateDashboard(ctx, args)
 	case toolGrafanaUpdateDashboard:
 		result, err = s.executeGrafanaUpdateDashboard(ctx, args)
+	case toolGrafanaPatchDashboard:
+		result, err = s.executeGrafanaPatchDashboard(ctx, args)
 	case toolGrafanaDeleteDashboard:
 		result, err = s.executeGrafanaDeleteDashboard(ctx, args)
 	case toolGrafanaCreateFolder:
@@ -1691,6 +1731,114 @@ func (s *Server) executeGrafanaUpdateDashboard(ctx context.Context, args map[str
 
 	result = fmt.Sprintf("Successfully updated dashboard with UID: %s", uid)
 	return result, err
+}
+
+// executeGrafanaPatchDashboard patches a dashboard server-side without
+// requiring the caller to ship the full model. The bot fetches the
+// dashboard losslessly (preserves every Grafana field the typed structs
+// don't model), applies a merge-patch or JSON Patch in-memory, and POSTs
+// the result back via the same UpdateDashboard path used by the full-
+// update tool. The LLM sends only the diff — a single-field edit on a
+// 52KB dashboard becomes a ~30-byte input.
+func (s *Server) executeGrafanaPatchDashboard(ctx context.Context, args map[string]interface{}) (result string, err error) {
+	if s.grafanaClient == nil {
+		err = errors.New("grafana access not configured (GRAFANA_URL or GRAFANA_API_KEY not set)")
+		return result, err
+	}
+
+	uid, _ := args["uid"].(string)
+	if uid == "" {
+		err = errors.New("uid parameter is required")
+		return result, err
+	}
+
+	mergeRaw, hasMerge := args["merge"]
+	patchesRaw, hasPatches := args["patches"]
+	if !hasMerge && !hasPatches {
+		err = errors.New("must supply exactly one of `merge` (RFC 7386 merge-patch object) or `patches` (RFC 6902 JSON Patch op list)")
+		return result, err
+	}
+	if hasMerge && hasPatches {
+		err = errors.New("must supply exactly one of `merge` or `patches`, not both")
+		return result, err
+	}
+
+	// Lossless GET — relies on the json.RawMessage representation so every
+	// unmodeled Grafana field survives into the patch input.
+	var existing *DashboardGetResponse
+	existing, err = s.grafanaClient.GetDashboard(ctx, uid)
+	if err != nil {
+		err = fmt.Errorf("fetching dashboard %s for patch: %w", uid, err)
+		return result, err
+	}
+
+	var patched []byte
+	patched, err = applyDashboardPatch(existing.Dashboard, mergeRaw, patchesRaw, hasMerge)
+	if err != nil {
+		return result, err
+	}
+
+	intention, _ := args["message"].(string)
+	auditUser := s.auditUserFromContext(ctx)
+	versionNote := composeVersionNote(auditUser, intention, "patched via mcp")
+
+	err = s.grafanaClient.UpdateDashboard(ctx, patched, existing.FolderUID, versionNote)
+	if err != nil {
+		return result, err
+	}
+
+	s.logger.InfoContext(ctx, "grafana write",
+		slog.String("tool", toolGrafanaPatchDashboard),
+		slog.String("uid", uid),
+		slog.String("title", existing.Title),
+		slog.String("audit_user", auditUser),
+		slog.String("audit_source_ip", auditSourceFromContext(ctx)),
+		slog.String("message", versionNote),
+	)
+
+	result = fmt.Sprintf("Successfully patched dashboard with UID: %s", uid)
+	return result, err
+}
+
+// applyDashboardPatch runs either a merge-patch or a JSON Patch against
+// the dashboard bytes. Caller is responsible for ensuring exactly one of
+// the two inputs is present (the executor validates).
+func applyDashboardPatch(dashboard []byte, mergeRaw, patchesRaw interface{}, useMerge bool) (patched []byte, err error) {
+	if useMerge {
+		var mergeBytes []byte
+		mergeBytes, err = json.Marshal(mergeRaw)
+		if err != nil {
+			err = fmt.Errorf("marshaling merge patch: %w", err)
+			return patched, err
+		}
+		patched, err = jsonpatch.MergePatch(dashboard, mergeBytes)
+		if err != nil {
+			err = fmt.Errorf("applying merge patch: %w", err)
+			return patched, err
+		}
+		return patched, err
+	}
+
+	var patchesBytes []byte
+	patchesBytes, err = json.Marshal(patchesRaw)
+	if err != nil {
+		err = fmt.Errorf("marshaling patch list: %w", err)
+		return patched, err
+	}
+
+	var patch jsonpatch.Patch
+	patch, err = jsonpatch.DecodePatch(patchesBytes)
+	if err != nil {
+		err = fmt.Errorf("decoding JSON patch: %w", err)
+		return patched, err
+	}
+
+	patched, err = patch.Apply(dashboard)
+	if err != nil {
+		err = fmt.Errorf("applying JSON patch: %w", err)
+		return patched, err
+	}
+	return patched, err
 }
 
 // executeGrafanaCreateFolder creates a Grafana folder (directory).
