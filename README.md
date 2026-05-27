@@ -581,10 +581,13 @@ The bot is configured via environment variables:
 - `MCP_JWT_SECRET` - JWT signing secret for JWT bearer token authentication
 - `MCP_JWT_ALGORITHM` - JWT algorithm (default: `HS256`, also supports `RS256`)
 - `MCP_API_KEYS` - API key authentication in format `key1:user1,key2:user2`
-- `MCP_OIDC_ISSUER_URL` - OIDC issuer URL for token validation (e.g., Dex endpoint)
-- `MCP_OIDC_AUDIENCE` - Expected OIDC audience claim
-- `MCP_OIDC_ALLOWED_GROUPS` - Comma-separated list of authorized groups
-- `MCP_OIDC_SKIP_ISSUER_VERIFY` - Skip issuer verification (default: `false`, use only for testing)
+- `MCP_OIDC_ISSUER` - Enables generic OIDC/JWKS auth on the MCP HTTP/SSE endpoints (e.g. `https://dex.tools.nxteam.dev`). When set, every request to `/mcp` and `/sse` must carry a signed RS256 JWT in `Authorization: Bearer …`; the bot validates the signature against the issuer's `/keys` JWKS endpoint, the `iss` claim against this URL, the `aud` claim against `MCP_OIDC_AUDIENCE`, and `exp`/`nbf`. Mutually exclusive with `GOOGLE_OAUTH_CLIENT_ID` — both-set is a startup error. **Recommended setup: [Dex + Google upstream](#dex--google-upstream-recommended).**
+- `MCP_OIDC_AUDIENCE` - Required when `MCP_OIDC_ISSUER` is set. The IdP client ID — binds tokens to this specific client. Refusing to run without it closes the audience-binding gap.
+- `MCP_OIDC_ALLOWED_HOSTED_DOMAINS` - Comma-separated allowlist of email domains (e.g. `katn-solutions.io`). The bot derives the domain from the `@`-suffix of the JWT's `email` claim — works whether or not the IdP passes through a separate `hd` claim. Empty = no domain restriction.
+- `MCP_OIDC_ALLOWED_EMAILS` - Comma-separated allowlist of exact email addresses. Useful for "these specific humans only," typically alongside the broader hosted-domain filter. Empty = no per-email restriction.
+- `MCP_OIDC_ALLOWED_GROUPS` - Comma-separated list of groups the user must be a member of (matched against the `groups` claim in the JWT). Empty means any authenticated user is allowed. Requires the IdP to emit the `groups` claim — for Google upstream, this requires Workspace Admin SDK access via domain-wide delegation; skip this knob if you don't have DWD configured.
+- `MCP_OIDC_JWKS_CACHE_SECONDS` - How long to cache the JWKS document. Default `300`.
+- `MCP_OIDC_SKIP_ISSUER_VERIFY` - Skip issuer verification (default: `false`, use only for testing).
 - `MCP_MTLS_CA_CERT_PATH` - Path to CA certificate for mutual TLS authentication
 - `MCP_MTLS_VERIFY_CLIENT` - Verify client certificates against CA (default: `true`)
 - `GOOGLE_OAUTH_CLIENT_ID` - Enables Google OAuth on the MCP HTTP/SSE endpoints. When set, every request to `/mcp` and `/sse` must carry a Google access token in `Authorization: Bearer …`; missing/invalid tokens get `401` with `WWW-Authenticate` pointing at `/.well-known/oauth-protected-resource`. Claude Code reads that, opens a browser to Google, and caches the token thereafter. The Slack-bot stdio path is unaffected — it never hits HTTP. When unset, the MCP HTTP/SSE endpoints stay unauthenticated (current VPC-gated behavior). See [Google OAuth setup](#google-oauth-setup).
@@ -760,56 +763,470 @@ Bot: Root cause identified:
      Resolution: Update config to reference tag 0.0.673
 ```
 
-## Google OAuth setup
+## Authentication
 
-The MCP HTTP/SSE endpoints can be gated behind Google OAuth so only authenticated Workspace users can connect. When enabled, Claude Code pops a browser on first connection, the user signs in with Google, and the token is cached for the session. Every Grafana write then carries the verified email as the audit identity (visible in Grafana's version history).
+The MCP HTTP/SSE endpoints can be gated behind OAuth so only authenticated humans can connect. Claude Code does the standard browser-pop OAuth flow on first connection, caches the token, and presents it on every subsequent request. Every Grafana write then carries the verified email as the audit identity (visible in Grafana's version history).
 
-The Slack-bot path is unaffected — it uses stdio, never HTTP.
+The Slack-bot path is unaffected by any of this — it uses stdio, never HTTP.
+
+There are two ways to enable it, with very different operational properties:
+
+- **[Dex + Google upstream](#dex--google-upstream-recommended)** — recommended. Dex acts as the authorization server Claude Code talks to, Google is Dex's upstream identity provider. End users never see Google's client secret. Add/remove users by editing Workspace membership.
+- **[Direct Google](#direct-google-oauth)** — simpler to set up but requires distributing Google's "Desktop app" client ID *and* client secret to every user via their `.mcp.json`. The secret can't be kept confidential in distributed binaries (Google's docs acknowledge this; PKCE bears the real security weight), but it still feels gross. Use this only if you can't or don't want to run Dex.
+
+### Authentication vs authorization
+
+Two distinct concerns, two distinct owners:
+
+| Concern | Owner | Mechanism |
+|---|---|---|
+| **Authn** — is this person who they say they are? | Google | Standard sign-in: password, MFA, Workspace conditional-access policies. Result: a signed ID token with `email`, `email_verified`, `sub`, etc. |
+| **Authz** — given a verified identity, can they use *this* server? | This server | `MCP_OIDC_ALLOWED_HOSTED_DOMAINS` (domain filter), `MCP_OIDC_ALLOWED_EMAILS` (per-user allowlist), `MCP_OIDC_ALLOWED_GROUPS` (group filter — needs IdP support for groups claim). Empty allowlist on any axis = no restriction on that axis. |
+
+A user denied at the authn layer never sees the bot — Google rejects sign-in. A user denied at the authz layer sees a 403 from the bot after authenticating. Both events log distinctly.
+
+## Dex + Google upstream (recommended)
+
+### Why this layer exists at all
+
+A reasonable first question: "If users authenticate via Google anyway, why does Dex sit in the middle?" Three concrete answers:
+
+1. **Google has no public-client support.** Every Google OAuth client — even "Desktop app" — is issued a client secret. The secret can't be kept confidential in a distributed CLI, and `claude mcp add` requires `--client-secret` on the direct-Google path. Dex's `staticClients[].public: true` *is* a true public client: PKCE only, no secret on either side of the Claude Code ↔ Dex relationship.
+
+2. **Google's OAuth surface never exposes group membership.** This is the load-bearing reason and it's not obvious from the Google Cloud Console. *No matter what scopes you request, what consent-screen settings you choose, or what OAuth client type you use*, the ID tokens Google issues do not contain a `groups` claim. Google Cloud Console has no toggle to enable it. Group information lives in the Workspace **Admin SDK Directory API**, which is a separate surface that requires a service account with **domain-wide delegation** to query. Dex's Google connector (when configured with `serviceAccountFilePath` + `adminEmail` + `groups:`) does that DWD dance server-side and emits a synthesized `groups` claim into the JWT it issues to your application. Without Dex (or your own DWD-aware service), group-based access control via Google OAuth is impossible — domain-only or email-only is the ceiling.
+
+3. **Provider abstraction.** The bot validates JWTs from `MCP_OIDC_ISSUER`, whatever that resolves to. Google today, Okta or Auth0 or self-hosted Keycloak tomorrow, without touching bot code or env vars. The IdP becomes a Dex config detail.
+
+If you don't need groups, never plan to switch identity providers, and are willing to live with the client-secret-in-every-user's-config friction, the [Direct Google OAuth](#direct-google-oauth) path is fine. For most setups it isn't worth the savings.
+
+### Architecture
+
+```
+                                             public client       confidential client
+                                           (PKCE, no secret)    (Google client secret
+Claude Code  ─────►  bot /mcp                                       stays on Dex)
+                       │
+                       │ 401 + WWW-Authenticate
+                       ▼
+              .well-known/oauth-protected-resource  ──►  authorization_servers: [Dex]
+                       │
+                       ▼
+                     Dex authorize  ──────────────────►  Google authorize
+                                                          (browser sign-in,
+                                                           MFA, consent)
+                       │   ◄──────────────────────────  ID token (email, hd)
+                       │
+                       ▼
+                  Dex-issued JWT  ◄─────  Claude Code's loopback callback
+                       │
+                       │ (PKCE code → ID token exchange)
+                       ▼
+              bot /mcp  +  Authorization: Bearer <Dex JWT>
+                       │
+              JWKS verify · iss/aud/exp checks ·
+              hosted-domain / email / groups gate
+                       │
+                       ▼
+                  authenticated  →  audit_user = JWT email
+```
+
+### How it works
+
+The architecture relies on three distinct OAuth/trust relationships. Keeping them straight is what makes the rest of the setup make sense.
+
+```
+┌─────────────────────────────────────────────────────────────────────────┐
+│                                                                         │
+│   Relationship 1: Dex ↔ Google                                          │
+│                                                                         │
+│   Dex is a confidential OAuth client of Google. Has a client ID +       │
+│   secret issued by Google Cloud Console (Web app type). The secret      │
+│   lives on Dex's pod, never crosses the wire to end users.              │
+│   Google trusts Dex; Dex trusts Google.                                 │
+│                                                                         │
+│   Relationship 2: Claude Code ↔ Dex                                     │
+│                                                                         │
+│   Claude Code is a public OAuth client of Dex. Has only a client ID     │
+│   ("diagnostic-bot"), no secret. PKCE bears the security. Defined in    │
+│   Dex's config under staticClients with public: true.                   │
+│   Dex trusts Claude Code (via PKCE proof); Claude Code trusts Dex.      │
+│                                                                         │
+│   Relationship 3: Bot ↔ Dex                                             │
+│                                                                         │
+│   The bot is a resource server. It validates JWTs Dex issued by         │
+│   checking Dex's signature (JWKS at <dex>/keys), iss, aud, exp.         │
+│   No OAuth client relationship — the bot never calls Dex's auth         │
+│   endpoints, never holds a credential. Just validates tokens.           │
+│   Bot trusts Dex's signing key; Dex doesn't know the bot exists.        │
+│                                                                         │
+└─────────────────────────────────────────────────────────────────────────┘
+```
+
+Notice: **Google only sees Dex.** Google has no idea diagnostic-bot exists, no idea Claude Code is in the picture. From Google's perspective there's one OAuth app, "Dex," that signs people in. That's what lets you use Workspace policy (MFA, conditional access, device posture) to gate the bot — those policies attach to Dex's OAuth app, and any user reaching Dex is subject to them.
+
+#### First-connection sequence
+
+```
+Step 1 — Claude Code hits the bot cold
+
+  Claude Code  ───── GET /mcp ─────►  bot
+                                       │
+                                       │ no Authorization header → 401
+                                       ▼
+  Claude Code  ◄──── 401 ──── WWW-Authenticate: Bearer
+                                resource_metadata="https://bot.example.com/
+                                                   .well-known/oauth-protected-resource"
+
+Step 2 — Claude Code discovers Dex
+
+  Claude Code  ──── GET /.well-known/oauth-protected-resource ────►  bot
+  Claude Code  ◄── { "authorization_servers": ["https://dex…"], … }
+
+  Claude Code  ──── GET /.well-known/openid-configuration ────►  Dex
+  Claude Code  ◄── { authorization_endpoint, token_endpoint, jwks_uri, … }
+
+Step 3 — Claude Code starts the OAuth dance
+
+  Claude Code spins up a local listener on 127.0.0.1:8080.
+  Generates a PKCE code_verifier + code_challenge (SHA256).
+  Opens the user's default browser to:
+
+    https://dex…/auth
+      ?client_id=diagnostic-bot
+      &redirect_uri=http://localhost:8080/callback
+      &response_type=code
+      &code_challenge=<sha256-of-verifier>
+      &code_challenge_method=S256
+      &scope=openid+email+profile
+      &state=<random>
+
+Step 4 — Dex sees the request, kicks the user to Google
+
+  Dex looks up "diagnostic-bot" in staticClients, confirms public: true,
+  confirms the redirect_uri is in the allowed list. Then it has to
+  authenticate the user — that's what the connector is for.
+
+  Dex generates an internal auth state, redirects the browser to:
+
+    https://accounts.google.com/o/oauth2/v2/auth
+      ?client_id=<dex's Google client id>
+      &redirect_uri=https://dex…/callback
+      &response_type=code
+      &scope=openid email profile
+      &state=<dex's internal state>
+
+Step 5 — Google authenticates the human
+
+  User sees Google's sign-in page. Enters email + password + MFA
+  + clicks through any Workspace conditional-access prompts.
+  Workspace policy enforces: hosted domain, suspended accounts, etc.
+
+  Google → browser → https://dex…/callback?code=<google-code>
+
+Step 6 — Dex exchanges the code with Google, gets the user's identity
+
+  Dex (server-side, with its Google client secret) POSTs to:
+
+    https://oauth2.googleapis.com/token
+      code=<google-code>
+      client_id=<dex's google client id>
+      client_secret=<dex's google client secret>  ◄─── the secret that
+      grant_type=authorization_code                    NEVER leaves Dex
+      redirect_uri=https://dex…/callback
+
+  Google returns:
+
+    {
+      "access_token": "ya29…",
+      "id_token": "eyJ…",   ◄── signed JWT with email, sub, hd, name, etc.
+      "expires_in": 3599
+    }
+
+  Dex verifies the Google ID token's signature using Google's JWKS,
+  extracts the email, applies the connector's hostedDomains filter.
+
+Step 7 — Dex issues its own JWT to Claude Code
+
+  Dex maps Google's claims into a fresh JWT it signs with its own key:
+
+    {
+      "iss": "https://dex.tools.nxteam.dev",   ◄── Dex's issuer URL,
+                                                   matches MCP_OIDC_ISSUER
+      "sub": "<dex's internal user id>",
+      "aud": "diagnostic-bot",                 ◄── matches MCP_OIDC_AUDIENCE
+      "email": "alice@katn-solutions.io",      ◄── propagated from Google
+      "email_verified": true,
+      "name": "Alice",
+      "exp": …, "iat": …,
+      // No `hd` claim — Dex doesn't pass that through.
+      // No `groups` claim either, unless DWD is configured.
+    }
+
+  Dex finishes the original flow by redirecting:
+
+    https://localhost:8080/callback?code=<dex-code>&state=<random>
+
+  Browser hits the loopback. Claude Code's listener catches it.
+
+Step 8 — Claude Code exchanges Dex's code for the JWT
+
+  Claude Code POSTs to Dex's token endpoint with the code AND the original
+  PKCE code_verifier. Dex confirms SHA256(verifier) == code_challenge it
+  saw earlier — that's PKCE proof. No client secret involved.
+
+  Dex returns:
+
+    {
+      "access_token": "<Dex JWT>",
+      "id_token":     "<Dex JWT>",
+      "token_type":   "Bearer",
+      "expires_in":   86400,
+      "refresh_token": "<opaque refresh token>"
+    }
+
+  Claude Code stores all of this. The browser closes itself.
+
+Step 9 — Claude Code retries the bot with the token
+
+  Claude Code  ──── GET /mcp ────►  bot
+                Authorization: Bearer <Dex JWT>
+                                     │
+                                     │ The bot:
+                                     │   1. Parses the JWT
+                                     │   2. Fetches Dex's JWKS from
+                                     │      https://dex…/keys (cached
+                                     │      for MCP_OIDC_JWKS_CACHE_SECONDS)
+                                     │   3. Verifies the signature
+                                     │   4. Checks iss == MCP_OIDC_ISSUER
+                                     │   5. Checks aud == MCP_OIDC_AUDIENCE
+                                     │   6. Checks exp
+                                     │   7. Splits email on @ → checks
+                                     │      domain against
+                                     │      MCP_OIDC_ALLOWED_HOSTED_DOMAINS
+                                     │   8. Checks email against
+                                     │      MCP_OIDC_ALLOWED_EMAILS
+                                     │   9. (Optionally) checks groups
+                                     ▼
+                            request runs, audit identity = "alice@katn-solutions.io"
+```
+
+#### Steady state
+
+Claude Code caches the Dex JWT. Every subsequent MCP call just sends:
+
+```
+GET /mcp
+Authorization: Bearer <cached Dex JWT>
+```
+
+Bot validates signature against the cached JWKS (no network call) → done. The whole thing is one signature verify and a few string compares, sub-millisecond.
+
+When the JWT expires (typically 24h), Claude Code refreshes against Dex. Dex hits Google with *its* refresh token to confirm the user still has a valid Workspace session. If Google says "user is suspended / no longer in the org," Dex returns an error and Claude Code is forced into the full re-auth flow — which Google will then refuse, locking the user out.
+
+### Step 1: Create the Google "Web application" OAuth client (one-time)
+
+This is the client *Dex* uses against Google. It is confidential and its secret stays on Dex's pod. End users never see it. Concrete values throughout:
+
+#### 1a. OAuth consent screen
+
+The consent screen must be configured before you can create the client. Settings:
+
+| Field | Value | Notes |
+|---|---|---|
+| User Type | **Internal** | Restricts sign-in to your Workspace domain. External would also work but exposes the consent screen to arbitrary Google accounts. |
+| App name | `Diagnostic Bot (via Dex)` | What users see on the consent screen |
+| User support email | `<your support email>` | Must be a Workspace email |
+| App logo | optional | |
+| **Authorized domains** | `tools.nxteam.dev` | Top-level eTLD+1 of any redirect URI you plan to use. **One entry per top-level domain** — don't list the full URL here. |
+| Developer contact info | `<your email>` | Workspace email is fine |
+| Scopes | Add `openid`, `.../auth/userinfo.email`, `.../auth/userinfo.profile` | Non-sensitive. No verification needed for Internal apps. |
+
+For an Internal app, no Google review / verification is required even for "sensitive" scopes — but you're not using sensitive ones anyway.
+
+#### 1b. APIs to enable
+
+Going to **APIs & Services → Library**:
+
+- The basic OIDC flow needs **nothing enabled**. `openid` + `email` + `profile` scopes are core OAuth and work without an explicit API enable.
+- If you ever want groups via DWD: enable **Admin SDK API**. Skip otherwise.
+
+> **No-groups-via-OAuth warning.** Don't expect group membership to appear in the OAuth flow you just configured. Google's ID tokens do *not* include a `groups` claim — there is no scope, no consent-screen setting, no Console toggle that adds one. Group information lives in the Workspace Admin SDK Directory API and is fetched out-of-band by Dex when you configure DWD on the connector (see Step 2's commented `serviceAccountFilePath` block). If you skip the DWD setup, your tokens carry email + domain but no groups, which is fine for `MCP_OIDC_ALLOWED_HOSTED_DOMAINS` and `MCP_OIDC_ALLOWED_EMAILS` filtering — just don't set `MCP_OIDC_ALLOWED_GROUPS`.
+
+#### 1c. Create the OAuth client
+
+**APIs & Services → Credentials → Create Credentials → OAuth client ID**:
+
+| Field | Value | Notes |
+|---|---|---|
+| Application type | **Web application** | Required for the Dex-as-confidential-client model. Not "Desktop app" — that's the direct-Google path. |
+| Name | `dex-google-upstream` | Internal label; users never see it. |
+| **Authorized JavaScript origins** | (none) | Dex doesn't make browser-side JS calls. Leave empty. |
+| **Authorized redirect URIs** | `https://dex.tools.nxteam.dev/callback` | Exact match. Must be HTTPS in production. Dex's callback path is `/callback` by default — verify against your Dex deployment's `issuer:` URL. Append more entries if you have multiple Dex environments (e.g. staging + prod). |
+
+After saving, Google shows you the **Client ID** and **Client secret**. Both go straight into Dex's config (Step 2). Save the secret somewhere safe — Google will let you re-fetch it but you should treat it as a credential.
+
+### Step 2: Add the Google connector + a public client for the bot to your Dex config
+
+```yaml
+issuer: https://dex.tools.nxteam.dev   # must match MCP_OIDC_ISSUER exactly
+
+connectors:
+  # Your existing SSH connector for kubectl, unchanged
+  - type: ssh
+    id: ssh
+    # ...
+
+  # New: Google upstream for browser users (diagnostic-bot, etc.)
+  - type: google
+    id: google
+    name: Google
+    config:
+      clientID: <dex-google-upstream-client-id>.apps.googleusercontent.com
+      clientSecret: <dex-google-upstream-client-secret>   # Dex's secret to Google. Never given to users.
+      redirectURI: https://dex.tools.nxteam.dev/callback
+      hostedDomains:
+        - katn-solutions.io                                # Workspace-only
+      # Optional: emit a `groups` claim. Requires a Workspace service
+      # account with domain-wide delegation. Skip this whole block if
+      # you don't have DWD configured — domain-only allowlisting is fine.
+      # serviceAccountFilePath: /etc/dex/google-svc.json
+      # adminEmail: dex-admin@katn-solutions.io
+      # groups:
+      #   - sre@katn-solutions.io
+      #   - platform@katn-solutions.io
+
+staticClients:
+  - id: diagnostic-bot
+    name: Diagnostic Bot MCP
+    public: true                                            # ← true public client, PKCE only
+    redirectURIs:
+      - http://localhost:8080/callback                      # Claude Code's loopback listener
+```
+
+The `staticClients[].public: true` is what makes this a real public client — no secret needed on Dex's side either. Authentication is delegated entirely to Google; Dex is essentially proxying.
+
+### Step 3: Bot env vars
+
+```
+MCP_OIDC_ISSUER=https://dex.tools.nxteam.dev
+MCP_OIDC_AUDIENCE=diagnostic-bot
+MCP_PUBLIC_URL=https://diagnostic-bot.example.com
+
+# Authorization (pick whichever combination fits your team)
+MCP_OIDC_ALLOWED_HOSTED_DOMAINS=katn-solutions.io                 # broad
+MCP_OIDC_ALLOWED_EMAILS=alice@katn-solutions.io,bob@katn-solutions.io   # narrow, optional
+# MCP_OIDC_ALLOWED_GROUPS=sre,platform                            # only if Dex emits groups
+```
+
+When `MCP_OIDC_ISSUER` is unset, the OIDC path is off. Both `MCP_OIDC_ISSUER` and `GOOGLE_OAUTH_CLIENT_ID` set simultaneously is a startup error — pick exactly one.
+
+### Step 4: How each user adds the server to Claude Code
+
+```bash
+claude mcp add diagnostic-bot https://diagnostic-bot.example.com/mcp \
+  --transport http \
+  --client-id diagnostic-bot \
+  --callback-port 8080
+```
+
+No `--client-secret`. The `--client-id` value is just the Dex static client name; it's not a secret. On first MCP call:
+
+1. Claude Code hits `/mcp` with no token. Bot returns `401` with `WWW-Authenticate: Bearer resource_metadata="<bot>/.well-known/oauth-protected-resource"`.
+2. Claude Code reads the metadata, discovers Dex as the authorization server.
+3. Claude Code spins up a loopback listener on `localhost:8080/callback`, opens the user's browser to `https://dex.tools.nxteam.dev/auth` with PKCE.
+4. Dex redirects to Google sign-in. User signs in (password + MFA + whatever Workspace policy demands).
+5. Google returns to Dex, Dex issues its own JWT, redirects to the loopback URL with an auth code.
+6. Claude Code exchanges the code for the JWT, caches it, sends it on every subsequent request.
+7. Bot validates the JWT against Dex's JWKS (cached locally), checks `iss`/`aud`/`exp`, applies the allowlists, stamps the verified `email` on audit logs.
+
+Subsequent invocations of Claude Code reuse the cached token until expiry. Revoking a user means removing them from Workspace; their next token refresh fails at the Google sign-in step.
+
+### Revoking access — what each lever does
+
+| Action | Where | Time-to-effect |
+|---|---|---|
+| Suspend user in Google Workspace | Workspace Admin → Users → Suspend | Next Dex token refresh (typically ≤ 24h). Instant if you also revoke the user's Dex refresh tokens in Dex's storage. |
+| Remove user from `MCP_OIDC_ALLOWED_EMAILS` | Bot env var, redeploy bot | Next request after pod restart. |
+| Pull `diagnostic-bot` from Dex `staticClients` | Edit Dex config, redeploy Dex | Next refresh from any user. Already-issued JWTs stay valid until their `exp`. |
+| Revoke Dex's Google OAuth app | Google Cloud Console → Credentials → Delete | Every Dex user locked out instantly. Catastrophic-failure / incident-response lever; not for routine revocation. |
+| Tighten `MCP_OIDC_ALLOWED_HOSTED_DOMAINS` | Bot env var, redeploy bot | Next request after pod restart. |
+| Kill the bot pod | Kubernetes | The whole HTTP MCP surface goes offline (Slack-bot path keeps working). |
+
+The everyday "person left, lock them out" workflow is **suspend in Workspace Admin**. Everything else is incident-response material.
+
+### Allowlist patterns
+
+| Goal | Config |
+|---|---|
+| Anyone in the Workspace | `MCP_OIDC_ALLOWED_HOSTED_DOMAINS=katn-solutions.io` |
+| Two specific humans, no one else | `MCP_OIDC_ALLOWED_EMAILS=alice@katn-solutions.io,bob@katn-solutions.io` |
+| Anyone in the SRE Google Group, no one else | DWD setup + `MCP_OIDC_ALLOWED_GROUPS=sre@katn-solutions.io` |
+| Anyone in Workspace, but Grafana writes only from specific humans | Set both `MCP_OIDC_ALLOWED_HOSTED_DOMAINS` and `MCP_OIDC_ALLOWED_EMAILS` |
+
+### Why this design is clean
+
+1. **One source of truth for identity.** Google Workspace. The bot has no users, no passwords, no per-user key material. Add a person → add to Workspace; remove → suspend in Workspace.
+2. **Bot stays simple.** It validates JWTs. Doesn't speak OAuth flow, doesn't redirect users, doesn't host login pages, doesn't store sessions. JWT-in-header, JWKS-from-Dex, done. Sub-millisecond per request after the JWKS is cached.
+3. **Authn vs authz, separated.** Workspace decides who's authenticated. The bot's env vars decide who can use *this specific server*. You can run ten MCP servers all backed by the same Dex, each with its own allowlist.
+4. **Dex handles what Google OAuth doesn't expose.** The public-client model and group claim emission (when DWD is wired) both live in Dex — see [Why this layer exists at all](#why-this-layer-exists-at-all). The bot just consumes whatever Dex issues; it doesn't care that there's a Workspace Admin SDK call happening on the back end.
+5. **The Slack-bot path stays separate.** Slack-bot uses stdio, hits an in-process MCP server, never goes through the HTTP listener that's auth-gated. Investigations triggered via Slack are attributed via the Slack username (existing path). Investigations triggered via Claude Code over HTTP are attributed via the verified Google email. Two paths, two attribution mechanisms, no overlap.
+
+The one trade-off: you have to run Dex. If you're already running it for other purposes (kubectl SSH connector, other internal services), this is free; if not, that's a non-trivial operational ask.
+
+## Direct Google OAuth
+
+Simpler setup, but every user has to put both Google's client ID *and* client secret in their `.mcp.json`. Use this only when you can't run Dex.
 
 ### One-time Google Cloud Console setup
 
-1. APIs & Services → Credentials → **Create Credentials** → **OAuth client ID**.
-2. Application type: **Desktop app** (Web app types don't allow `http://localhost` redirects, which Claude Code requires for the loopback callback).
-3. Name it something like `diagnostic-bot-mcp`.
-4. Note the **Client ID** (looks like `123456-abc.apps.googleusercontent.com`). You don't need the client secret — PKCE handles that.
-5. OAuth consent screen: set User Type to **Internal** (restricts auth to your Workspace domain) if you don't want external Google accounts able to attempt sign-in.
+#### OAuth consent screen
 
-### Bot-side configuration
+Same shape as the Dex path's consent screen — set this up first if you haven't:
 
-Set these env vars on the bot:
+| Field | Value | Notes |
+|---|---|---|
+| User Type | **Internal** | Restricts sign-in to your Workspace domain. |
+| App name | `Diagnostic Bot` | Shown on the consent screen each user sees. |
+| User support email | `<your support email>` | Workspace email. |
+| Authorized domains | (none required) | Desktop-app clients use `http://localhost` redirects, no public domain to authorize. |
+| Scopes | `openid`, `.../auth/userinfo.email`, `.../auth/userinfo.profile` | Non-sensitive. |
+
+#### OAuth client
+
+**APIs & Services → Credentials → Create Credentials → OAuth client ID**:
+
+| Field | Value | Notes |
+|---|---|---|
+| Application type | **Desktop app** | Required: this is the type that supports `http://localhost:<port>/callback` loopback redirects, which Claude Code's callback listener uses. Web app type would reject the loopback URL. |
+| Name | `diagnostic-bot-direct` | Internal label only. |
+
+After saving, Google shows the **Client ID** and **Client secret**. Both go into every user's `claude mcp add` command below.
+
+The "secret" can't be kept confidential in a distributed CLI — Google's own docs acknowledge this and PKCE provides the actual security. But you do need both pieces in users' config files, and you should treat the client ID + secret pair like an internal credential (i.e. don't paste it into a public Slack channel, don't ship it in a public GitHub repo).
+
+### Bot env vars
 
 ```
 GOOGLE_OAUTH_CLIENT_ID=<your-id>.apps.googleusercontent.com
 GOOGLE_ALLOWED_HOSTED_DOMAINS=katn-solutions.io
+GOOGLE_ALLOWED_EMAILS=alice@katn-solutions.io,bob@katn-solutions.io   # optional
 MCP_PUBLIC_URL=https://diagnostic-bot.example.com
 ```
 
-Optional finer-grained control:
-
-```
-GOOGLE_ALLOWED_EMAILS=alice@katn-solutions.io,bob@katn-solutions.io
-```
-
-When `GOOGLE_OAUTH_CLIENT_ID` is unset, the MCP HTTP/SSE endpoints stay unauthenticated (current VPC-gated behavior).
-
-### Client-side `.mcp.json`
-
-Each user adds the server to Claude Code with the same client ID:
+### Each user's `.mcp.json` / `claude mcp add`
 
 ```bash
-claude mcp add diagnostic-bot https://diagnostic-bot.example.com/mcp --client-id=<your-id>.apps.googleusercontent.com
+claude mcp add diagnostic-bot https://diagnostic-bot.example.com/mcp \
+  --transport http \
+  --client-id <your-id>.apps.googleusercontent.com \
+  --client-secret <google-issued-secret>
 ```
 
-On first use, Claude Code:
-1. Sends a request to `/mcp` with no token.
-2. Receives `401` with `WWW-Authenticate: Bearer resource_metadata="https://diagnostic-bot.example.com/.well-known/oauth-protected-resource"`.
-3. Fetches that metadata, discovers Google as the authorization server.
-4. Spins up a loopback listener on a random local port.
-5. Opens the user's default browser to Google's sign-in page (with PKCE).
-6. After successful sign-in, captures the auth code from the loopback redirect, exchanges it for an access token.
-7. Re-sends the request to `/mcp` with `Authorization: Bearer <token>` — and caches the token for subsequent requests.
+On first use, Claude Code pops a browser to Google, captures the auth code, exchanges it for an access token, and presents it to the bot. The bot validates each token by calling Google's `userinfo` endpoint (cached for 5 minutes by default), enforces the hosted-domain / email allowlists, stamps the verified email on audit logs.
 
-The bot validates the token against Google's `userinfo` endpoint (cached for 5 minutes by default), enforces the hosted-domain / email allowlists, and stamps the verified email onto every audit-logged write.
+### Compatibility note for non-Dex / non-Google OIDC providers
+
+The OIDC validator hardcodes `<issuer>/keys` as the JWKS path — Dex's convention. Other IdPs (Okta, Auth0, some Keycloak configurations) serve JWKS under different paths. If you point this at a non-Dex IdP and JWKS discovery fails, generalize `refreshJWKSCache` in `pkg/mcp/auth/oidc.go` to fetch `<issuer>/.well-known/openid-configuration` and read `jwks_uri` from it. Not done by default to avoid widening scope.
 
 ## Security
 

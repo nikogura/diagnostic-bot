@@ -18,21 +18,48 @@ import (
 
 // OIDCAuth implements OIDC token validation (like tdoctl).
 type OIDCAuth struct {
-	issuerURL        string
-	audience         string
-	allowedGroups    []string
-	jwksCacheTime    int
-	skipIssuerVerify bool
-	logger           *slog.Logger
-	jwksCache        map[string]*rsa.PublicKey
-	jwksCacheExp     time.Time
+	issuerURL            string
+	audience             string
+	allowedGroups        []string
+	allowedHostedDomains []string
+	allowedEmails        []string
+	jwksCacheTime        int
+	skipIssuerVerify     bool
+	logger               *slog.Logger
+	jwksCache            map[string]*rsa.PublicKey
+	jwksCacheExp         time.Time
 }
 
 // OIDCConfig holds OIDC configuration.
+//
+// Authn vs authz split: signature/issuer/audience/exp verification is the
+// IdP's promise (authn). The Allowed* fields are this server's
+// authorization policy on top of that — they say "given a verified
+// identity, can this person use this server?". Empty allowlist on any
+// axis means "no restriction on that axis".
 type OIDCConfig struct {
-	IssuerURL        string
-	Audience         string
-	AllowedGroups    []string
+	IssuerURL string
+	Audience  string
+
+	// AllowedGroups restricts access to users whose JWT `groups` claim
+	// contains at least one of the listed values. Requires the IdP to
+	// emit a `groups` claim (Dex with a connector that does, etc.).
+	// Empty = any authenticated user.
+	AllowedGroups []string
+
+	// AllowedHostedDomains restricts access to users whose email's
+	// domain part (everything after the `@`) is in the listed values.
+	// We derive the domain from `email` rather than `hd` because Dex
+	// doesn't pass `hd` through to its issued JWTs even when the
+	// upstream connector is Google. Empty = any domain.
+	AllowedHostedDomains []string
+
+	// AllowedEmails restricts access to users whose `email` claim is
+	// exactly one of the listed values. Useful for "these specific
+	// humans only" alongside the broader hosted-domain filter.
+	// Empty = no per-email restriction.
+	AllowedEmails []string
+
 	JWKSCacheTime    int // seconds
 	SkipIssuerVerify bool
 }
@@ -58,13 +85,15 @@ func NewOIDCAuth(config *OIDCConfig, logger *slog.Logger) (auth *OIDCAuth) {
 	}
 
 	auth = &OIDCAuth{
-		issuerURL:        config.IssuerURL,
-		audience:         config.Audience,
-		allowedGroups:    config.AllowedGroups,
-		jwksCacheTime:    config.JWKSCacheTime,
-		skipIssuerVerify: config.SkipIssuerVerify,
-		logger:           logger,
-		jwksCache:        make(map[string]*rsa.PublicKey),
+		issuerURL:            config.IssuerURL,
+		audience:             config.Audience,
+		allowedGroups:        config.AllowedGroups,
+		allowedHostedDomains: config.AllowedHostedDomains,
+		allowedEmails:        config.AllowedEmails,
+		jwksCacheTime:        config.JWKSCacheTime,
+		skipIssuerVerify:     config.SkipIssuerVerify,
+		logger:               logger,
+		jwksCache:            make(map[string]*rsa.PublicKey),
 	}
 	return auth
 }
@@ -233,25 +262,81 @@ func (a *OIDCAuth) validateStandardClaims(claims jwt.MapClaims) (err error) {
 	return err
 }
 
-// validateAuthorization checks if user is authorized based on group membership.
+// validateAuthorization checks if the authenticated identity is permitted
+// to use this server. Three independent layers, all applied; any layer
+// can reject. Empty allowlist on a layer means "no restriction on this
+// axis." Domain runs first (cheapest, broadest), then email, then groups.
 func (a *OIDCAuth) validateAuthorization(result *Result) (err error) {
-	// If no groups configured, allow all authenticated users
+	err = a.validateHostedDomain(result)
+	if err != nil {
+		return err
+	}
+	err = a.validateEmailAllowlist(result)
+	if err != nil {
+		return err
+	}
+	err = a.validateGroupMembership(result)
+	if err != nil {
+		return err
+	}
+	return err
+}
+
+// validateHostedDomain enforces the hosted-domain allowlist by comparing
+// the domain portion of the `email` claim. We don't rely on Google's `hd`
+// claim because Dex doesn't pass it through to its own issued JWTs even
+// when an upstream Google connector emits one — the email-suffix derivation
+// works uniformly across IdPs.
+func (a *OIDCAuth) validateHostedDomain(result *Result) (err error) {
+	if len(a.allowedHostedDomains) == 0 {
+		return err
+	}
+	at := strings.LastIndex(result.Email, "@")
+	if at < 0 || at == len(result.Email)-1 {
+		err = fmt.Errorf("hosted domain check failed: email claim %q has no domain part", result.Email)
+		return err
+	}
+	domain := result.Email[at+1:]
+	for _, allowed := range a.allowedHostedDomains {
+		if domain == allowed {
+			return err
+		}
+	}
+	err = fmt.Errorf("hosted domain %q is not in the allowed list %v", domain, a.allowedHostedDomains)
+	return err
+}
+
+// validateEmailAllowlist enforces the per-user email allowlist.
+func (a *OIDCAuth) validateEmailAllowlist(result *Result) (err error) {
+	if len(a.allowedEmails) == 0 {
+		return err
+	}
+	for _, allowed := range a.allowedEmails {
+		if result.Email == allowed {
+			return err
+		}
+	}
+	err = fmt.Errorf("email %q is not in the allowed list", result.Email)
+	return err
+}
+
+// validateGroupMembership enforces the AllowedGroups list. Requires the
+// IdP to emit a `groups` claim — Dex with Google upstream and DWD, Dex
+// with LDAP, Keycloak with realm roles, etc. Empty list = any groups.
+func (a *OIDCAuth) validateGroupMembership(result *Result) (err error) {
 	if len(a.allowedGroups) == 0 {
 		return err
 	}
-
-	// Check if user is in any allowed group
 	for _, userGroup := range result.Groups {
 		for _, allowedGroup := range a.allowedGroups {
 			if userGroup == allowedGroup {
-				a.logger.Debug("User authorized via group membership",
+				a.logger.Debug("user authorized via group membership",
 					slog.String("username", result.Username),
 					slog.String("group", userGroup))
 				return err
 			}
 		}
 	}
-
 	err = fmt.Errorf("user %s not in any allowed groups %v, user groups: %v",
 		result.Username, a.allowedGroups, result.Groups)
 	return err

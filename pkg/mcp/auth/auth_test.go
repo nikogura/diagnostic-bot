@@ -1259,6 +1259,173 @@ func TestValidateAuthorization(t *testing.T) {
 	}
 }
 
+// TestOIDCAuthorizationHostedDomainFilter is the regression guard for the
+// hosted-domain authz layer. Authentication is Google's job (signed
+// claims); the bot's job is "given the claim, is this person allowed?"
+// We don't depend on Google's `hd` claim because Dex doesn't pass it
+// through — we derive the domain from the email's `@` suffix.
+func TestOIDCAuthorizationHostedDomainFilter(t *testing.T) {
+	t.Parallel()
+	logger := slog.New(slog.NewJSONHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError}))
+
+	tests := []struct {
+		name           string
+		allowed        []string
+		email          string
+		wantErr        bool
+		wantErrMessage string
+	}{
+		{
+			name:    "empty allowlist allows any domain",
+			allowed: nil,
+			email:   "alice@example.com",
+			wantErr: false,
+		},
+		{
+			name:    "email domain matches allowed",
+			allowed: []string{"katn-solutions.io"},
+			email:   "alice@katn-solutions.io",
+			wantErr: false,
+		},
+		{
+			name:           "email domain not in allowlist",
+			allowed:        []string{"katn-solutions.io"},
+			email:          "mallory@evil.example",
+			wantErr:        true,
+			wantErrMessage: "hosted domain",
+		},
+		{
+			name:           "missing email when allowlist set",
+			allowed:        []string{"katn-solutions.io"},
+			email:          "",
+			wantErr:        true,
+			wantErrMessage: "hosted domain",
+		},
+		{
+			name:           "malformed email without @ when allowlist set",
+			allowed:        []string{"katn-solutions.io"},
+			email:          "not-an-email",
+			wantErr:        true,
+			wantErrMessage: "hosted domain",
+		},
+		{
+			name:    "multiple allowed domains, one matches",
+			allowed: []string{"katn-solutions.io", "example.com"},
+			email:   "bob@example.com",
+			wantErr: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			oidcAuth := NewOIDCAuth(&OIDCConfig{
+				IssuerURL:            "https://issuer.example.com",
+				AllowedHostedDomains: tt.allowed,
+			}, logger)
+			err := oidcAuth.validateAuthorization(&Result{Username: "test", Email: tt.email})
+			if tt.wantErr {
+				require.Error(t, err)
+				require.Contains(t, err.Error(), tt.wantErrMessage)
+			} else {
+				require.NoError(t, err)
+			}
+		})
+	}
+}
+
+// TestOIDCAuthorizationEmailFilter verifies the per-user allowlist layer.
+// Often combined with the domain filter ("anyone in this Workspace, AND
+// only these specific addresses can write to Grafana").
+func TestOIDCAuthorizationEmailFilter(t *testing.T) {
+	t.Parallel()
+	logger := slog.New(slog.NewJSONHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError}))
+
+	tests := []struct {
+		name           string
+		allowed        []string
+		email          string
+		wantErr        bool
+		wantErrMessage string
+	}{
+		{
+			name:    "empty allowlist allows any email",
+			allowed: nil,
+			email:   "alice@example.com",
+			wantErr: false,
+		},
+		{
+			name:    "exact email match",
+			allowed: []string{"alice@katn-solutions.io", "bob@katn-solutions.io"},
+			email:   "alice@katn-solutions.io",
+			wantErr: false,
+		},
+		{
+			name:           "email not in allowlist",
+			allowed:        []string{"alice@katn-solutions.io"},
+			email:          "carol@katn-solutions.io",
+			wantErr:        true,
+			wantErrMessage: "email",
+		},
+		{
+			name:           "missing email when allowlist set",
+			allowed:        []string{"alice@katn-solutions.io"},
+			email:          "",
+			wantErr:        true,
+			wantErrMessage: "email",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			oidcAuth := NewOIDCAuth(&OIDCConfig{
+				IssuerURL:     "https://issuer.example.com",
+				AllowedEmails: tt.allowed,
+			}, logger)
+			err := oidcAuth.validateAuthorization(&Result{Username: "test", Email: tt.email})
+			if tt.wantErr {
+				require.Error(t, err)
+				require.Contains(t, err.Error(), tt.wantErrMessage)
+			} else {
+				require.NoError(t, err)
+			}
+		})
+	}
+}
+
+// TestOIDCAuthorizationCombinedFilters verifies both axes are enforced
+// independently when configured together — failing either rejects.
+func TestOIDCAuthorizationCombinedFilters(t *testing.T) {
+	t.Parallel()
+	logger := slog.New(slog.NewJSONHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError}))
+	oidcAuth := NewOIDCAuth(&OIDCConfig{
+		IssuerURL:            "https://issuer.example.com",
+		AllowedHostedDomains: []string{"katn-solutions.io"},
+		AllowedEmails:        []string{"alice@katn-solutions.io"},
+		AllowedGroups:        []string{"sre"},
+	}, logger)
+
+	// Right domain, right email, right group → ok.
+	err := oidcAuth.validateAuthorization(&Result{Username: "alice", Email: "alice@katn-solutions.io", Groups: []string{"sre"}})
+	require.NoError(t, err)
+
+	// Right domain, right group, wrong email → rejected by email filter.
+	err = oidcAuth.validateAuthorization(&Result{Username: "alice", Email: "carol@katn-solutions.io", Groups: []string{"sre"}})
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "email")
+
+	// Right email + group, wrong domain → rejected by domain filter (domain runs first).
+	err = oidcAuth.validateAuthorization(&Result{Username: "alice", Email: "alice@evil.example", Groups: []string{"sre"}})
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "hosted domain")
+
+	// Right domain + email, missing group → rejected by group filter.
+	err = oidcAuth.validateAuthorization(&Result{Username: "alice", Email: "alice@katn-solutions.io", Groups: []string{"developers"}})
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "groups")
+}
+
 func TestParseRSAPublicKey(t *testing.T) {
 	t.Parallel()
 

@@ -2,10 +2,12 @@ package main
 
 import (
 	"context"
+	"errors"
 	"log/slog"
 	"net/http"
 	"os"
 	"os/signal"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -216,11 +218,29 @@ func startMCPHTTPServer(ctx context.Context, githubToken string, logger *slog.Lo
 	mcpHandler := mcp.WithAuditSourceMiddleware(sdkServer.StreamableHTTPHandler())
 	sseHandler := mcp.WithAuditSourceMiddleware(sdkServer.SSEHandler())
 
-	// Optional Google OAuth: enabled when GOOGLE_OAUTH_CLIENT_ID is set.
-	// Wraps /mcp and /sse with auth.WithAuth (401 + WWW-Authenticate
-	// triggers Claude Code's browser-pop OAuth flow). Slack-bot stdio
-	// path is untouched — it never hits this listener.
-	mcpHandler, sseHandler = maybeWrapGoogleAuth(ctx, mcpHandler, sseHandler, logger)
+	// Auth dispatch: exactly one of MCP_OIDC_ISSUER or GOOGLE_OAUTH_CLIENT_ID
+	// may be set. Either path wraps /mcp + /sse with auth.WithAuth (401 +
+	// WWW-Authenticate triggers Claude Code's browser-pop OAuth flow);
+	// neither set leaves the handlers unwrapped. Slack-bot stdio path is
+	// untouched — it never hits this listener.
+	provider, providerErr := selectAuthProvider(getEnv("MCP_OIDC_ISSUER", ""), getEnv("GOOGLE_OAUTH_CLIENT_ID", ""))
+	if providerErr != nil {
+		logger.ErrorContext(ctx, providerErr.Error())
+		os.Exit(1)
+	}
+	switch provider {
+	case authProviderOIDC:
+		var oidcErr error
+		mcpHandler, sseHandler, oidcErr = buildOIDCHandlers(ctx, mcpHandler, sseHandler, logger)
+		if oidcErr != nil {
+			logger.ErrorContext(ctx, oidcErr.Error())
+			os.Exit(1)
+		}
+	case authProviderGoogle:
+		mcpHandler, sseHandler = maybeWrapGoogleAuth(ctx, mcpHandler, sseHandler, logger)
+	case authProviderNone:
+		logger.InfoContext(ctx, "no auth provider configured — MCP HTTP/SSE will run without auth")
+	}
 
 	go func() {
 		mux := http.NewServeMux()
@@ -285,24 +305,148 @@ func maybeWrapGoogleAuth(ctx context.Context, mcpHandler, sseHandler http.Handle
 	return mcp, sse
 }
 
-// registerOAuthMetadataRoute serves /.well-known/oauth-protected-resource
-// when Google OAuth is configured. When GOOGLE_OAUTH_CLIENT_ID is unset
-// the route is omitted entirely — there's nothing to point clients at.
-func registerOAuthMetadataRoute(mux *http.ServeMux, logger *slog.Logger) {
-	clientID := getEnv("GOOGLE_OAUTH_CLIENT_ID", "")
-	if clientID == "" {
-		return
+// authProvider enumerates the auth backends the MCP HTTP server can wrap
+// /mcp and /sse with. Exactly one may be active at a time; both-set is a
+// startup error.
+type authProvider int
+
+const (
+	authProviderNone authProvider = iota
+	authProviderOIDC
+	authProviderGoogle
+)
+
+// selectAuthProvider resolves which auth backend, if any, the operator
+// configured. Pure function — testable without subprocess-spawning to
+// observe os.Exit. The caller turns the both-set error into os.Exit.
+func selectAuthProvider(oidcIssuer, googleClientID string) (provider authProvider, err error) {
+	oidcOn := oidcIssuer != ""
+	googleOn := googleClientID != ""
+	if oidcOn && googleOn {
+		err = errors.New("both MCP_OIDC_ISSUER and GOOGLE_OAUTH_CLIENT_ID are set — pick exactly one")
+		return provider, err
 	}
+	if oidcOn {
+		provider = authProviderOIDC
+		return provider, err
+	}
+	if googleOn {
+		provider = authProviderGoogle
+		return provider, err
+	}
+	provider = authProviderNone
+	return provider, err
+}
+
+// oauthMetadataConfig returns the authorization server URL and supported
+// scopes to advertise in the protected-resource metadata document,
+// based on which auth provider is active. Pure function.
+func oauthMetadataConfig(provider authProvider, oidcIssuer, googleClientID string) (authServerURL string, scopes []string, ok bool) {
+	switch provider {
+	case authProviderOIDC:
+		authServerURL = oidcIssuer
+		scopes = []string{"openid", "email", "profile", "groups"}
+		ok = true
+		return authServerURL, scopes, ok
+	case authProviderGoogle:
+		_ = googleClientID // signature symmetry; the AS URL is constant for Google
+		authServerURL = "https://accounts.google.com"
+		scopes = []string{"openid", "email", "profile"}
+		ok = true
+		return authServerURL, scopes, ok
+	case authProviderNone:
+		return authServerURL, scopes, ok
+	}
+	return authServerURL, scopes, ok
+}
+
+// buildOIDCHandlers is the OIDC counterpart to maybeWrapGoogleAuth. Pure
+// in the sense that errors are returned rather than os.Exit'd, so the
+// caller (or tests) can decide what to do.
+func buildOIDCHandlers(ctx context.Context, mcpHandler, sseHandler http.Handler, logger *slog.Logger) (mcpOut, sseOut http.Handler, err error) {
+	mcpOut, sseOut = mcpHandler, sseHandler
+
+	issuer := strings.TrimRight(getEnv("MCP_OIDC_ISSUER", ""), "/")
+	if issuer == "" {
+		return mcpOut, sseOut, err
+	}
+
+	audience := getEnv("MCP_OIDC_AUDIENCE", "")
+	if audience == "" {
+		err = errors.New("MCP_OIDC_ISSUER set but MCP_OIDC_AUDIENCE is empty — refusing to run without audience binding")
+		return mcpOut, sseOut, err
+	}
+
 	publicURL := strings.TrimRight(getEnv("MCP_PUBLIC_URL", ""), "/")
 	if publicURL == "" {
-		return // already exited above; defensive
+		err = errors.New("MCP_OIDC_ISSUER set but MCP_PUBLIC_URL is empty — cannot build resource_metadata URL")
+		return mcpOut, sseOut, err
 	}
+
+	jwksCacheSeconds := 300
+	if s := getEnv("MCP_OIDC_JWKS_CACHE_SECONDS", ""); s != "" {
+		parsed, parseErr := strconv.Atoi(s)
+		if parseErr == nil {
+			jwksCacheSeconds = parsed
+		}
+	}
+
+	cfg := &auth.OIDCConfig{
+		IssuerURL:            issuer,
+		Audience:             audience,
+		AllowedGroups:        splitCSV(getEnv("MCP_OIDC_ALLOWED_GROUPS", "")),
+		AllowedHostedDomains: splitCSV(getEnv("MCP_OIDC_ALLOWED_HOSTED_DOMAINS", "")),
+		AllowedEmails:        splitCSV(getEnv("MCP_OIDC_ALLOWED_EMAILS", "")),
+		JWKSCacheTime:        jwksCacheSeconds,
+	}
+	oidcAuth := auth.NewOIDCAuth(cfg, logger)
+
+	resourceMetaURL := publicURL + "/.well-known/oauth-protected-resource"
+	mcpOut = auth.WithAuth(oidcAuth, resourceMetaURL, logger)(mcpHandler)
+	sseOut = auth.WithAuth(oidcAuth, resourceMetaURL, logger)(sseHandler)
+
+	logger.InfoContext(ctx, "OIDC auth enabled for MCP HTTP/SSE",
+		slog.String("issuer", issuer),
+		slog.String("audience", audience),
+		slog.Any("allowed_groups", cfg.AllowedGroups),
+		slog.Any("allowed_hosted_domains", cfg.AllowedHostedDomains),
+		slog.Int("allowed_emails_count", len(cfg.AllowedEmails)),
+		slog.Int("jwks_cache_seconds", cfg.JWKSCacheTime),
+		slog.String("resource_metadata_url", resourceMetaURL),
+	)
+	return mcpOut, sseOut, err
+}
+
+// registerOAuthMetadataRoute serves /.well-known/oauth-protected-resource
+// when an OAuth/OIDC provider is configured. With neither, the route is
+// omitted entirely — pointing clients at nothing is worse than 404.
+func registerOAuthMetadataRoute(mux *http.ServeMux, logger *slog.Logger) {
+	oidcIssuer := strings.TrimRight(getEnv("MCP_OIDC_ISSUER", ""), "/")
+	googleClientID := getEnv("GOOGLE_OAUTH_CLIENT_ID", "")
+
+	provider, err := selectAuthProvider(oidcIssuer, googleClientID)
+	if err != nil || provider == authProviderNone {
+		return
+	}
+
+	publicURL := strings.TrimRight(getEnv("MCP_PUBLIC_URL", ""), "/")
+	if publicURL == "" {
+		return
+	}
+
+	authServerURL, scopes, ok := oauthMetadataConfig(provider, oidcIssuer, googleClientID)
+	if !ok {
+		return
+	}
+
 	mux.Handle("/.well-known/oauth-protected-resource", auth.ProtectedResourceMetadataHandler(
 		publicURL+"/mcp",
-		"https://accounts.google.com",
-		[]string{"openid", "email", "profile"},
+		authServerURL,
+		scopes,
 	))
-	logger.Info("registered /.well-known/oauth-protected-resource for MCP OAuth discovery")
+	logger.Info("registered /.well-known/oauth-protected-resource for MCP OAuth discovery",
+		slog.String("authorization_server", authServerURL),
+	)
 }
 
 // splitCSV trims whitespace and drops empty entries from a comma-separated env value.
