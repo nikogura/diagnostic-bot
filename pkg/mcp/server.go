@@ -1174,6 +1174,75 @@ func validatePDFTemplate(tmpl string) (err error) {
 	return err
 }
 
+// buildPandocArgs assembles the pandoc command-line for a PDF render.
+//
+// Layer-1 security: the markdown reader is invoked as `markdown-raw_tex`,
+// not bare `markdown`, to disable pandoc's raw_tex extension. With
+// raw_tex enabled (pandoc's default), attacker-controlled markdown can
+// inject \input{/proc/self/environ} which xelatex resolves and typesets
+// into the PDF — an arbitrary-file-read / secret-exfiltration primitive.
+// Disabling the extension makes raw LaTeX render as literal text.
+// Math (tex_math_dollars) and other markdown features stay on; raw_tex
+// only governs the untrusted reader, not the trusted --template.
+func buildPandocArgs(outputPath, pdfEngine, pdfTemplate, title, companyName, inputPath string) (args []string) {
+	args = []string{
+		"-f", "markdown-raw_tex",
+		"-t", "pdf",
+		"--pdf-engine=" + pdfEngine,
+		"--template=" + pdfTemplate,
+		"--toc",
+		"--number-sections",
+		"--highlight-style=tango",
+		"-o", outputPath,
+	}
+	if title != "" {
+		args = append(args, "-M", "title="+title)
+	}
+	args = append(args, "-M", "companyname="+companyName)
+	args = append(args, inputPath)
+	return args
+}
+
+// buildPandocEnv assembles a minimal env for the pandoc/xelatex child
+// process. Only allowlisted parent env vars are forwarded (see
+// pandocSafeEnvVars); app secrets are dropped on the floor. TEXINPUTS
+// is set so xelatex finds .cls files under the template directory; the
+// TeX Live hardening vars (openin_any=p, openout_any=p, shell_escape=f)
+// block absolute-path / parent / dotfile reads and writes — belt for
+// the raw_tex disablement in buildPandocArgs.
+func buildPandocEnv(templateDir string) (env []string) {
+	// Allowlist of parent-process env vars pandoc/xelatex genuinely need.
+	// Anything outside this set — most importantly app secrets like
+	// ANTHROPIC_API_KEY, GRAFANA_API_KEY, SLACK_BOT_TOKEN, SLACK_APP_TOKEN
+	// — is deliberately not forwarded.
+	safe := []string{
+		"PATH",
+		"HOME",
+		"LANG",
+		"LC_ALL",
+		"TZ",
+		"TMPDIR",
+		"FONTCONFIG_PATH",
+		"TEXMFVAR",
+		"TEXMFHOME",
+	}
+	env = make([]string, 0, len(safe)+4)
+	for _, k := range safe {
+		v, ok := os.LookupEnv(k)
+		if !ok {
+			continue
+		}
+		env = append(env, k+"="+v)
+	}
+	env = append(env,
+		"TEXINPUTS=.:"+templateDir+"//:",
+		"openin_any=p",
+		"openout_any=p",
+		"shell_escape=f",
+	)
+	return env
+}
+
 // executeGeneratePDF generates a PDF from Markdown content using pandoc.
 //
 //nolint:funlen // Single logical unit: validate, prepare, execute pandoc, handle result
@@ -1229,34 +1298,15 @@ func (s *Server) executeGeneratePDF(ctx context.Context, args map[string]interfa
 	}
 
 	// Convert Markdown to PDF using pandoc
-	var cmd *exec.Cmd
-	cmdArgs := []string{
-		"-f", "markdown",
-		"-t", "pdf",
-		"--pdf-engine=" + pdfEngine,
-		"--template=" + pdfTemplate,
-		"--toc",
-		"--number-sections",
-		"--highlight-style=tango",
-		"-o", outputPath,
-	}
+	cmdArgs := buildPandocArgs(outputPath, pdfEngine, pdfTemplate, title, s.companyName, tmpMD.Name())
 
-	// Add title if provided
-	if title != "" {
-		cmdArgs = append(cmdArgs, "-M", "title="+title)
-	}
+	cmd := exec.CommandContext(ctx, "pandoc", cmdArgs...)
 
-	// Add company name for branding
-	cmdArgs = append(cmdArgs, "-M", "companyname="+s.companyName)
-
-	cmdArgs = append(cmdArgs, tmpMD.Name())
-
-	cmd = exec.CommandContext(ctx, "pandoc", cmdArgs...)
-
-	// Set TEXINPUTS to include the template's directory so LaTeX can find .cls files.
-	// The trailing colon includes the default search paths.
+	// Run pandoc/xelatex under a minimal env so the renderer cannot see
+	// app secrets (ANTHROPIC_API_KEY, GRAFANA_API_KEY, SLACK_*, etc.),
+	// even if a file-read primitive ever slips past Layer 1.
 	templateDir := filepath.Dir(pdfTemplate)
-	cmd.Env = append(os.Environ(), "TEXINPUTS=.:"+templateDir+"//:")
+	cmd.Env = buildPandocEnv(templateDir)
 	cmd.Dir = "/tmp" // Run from /tmp where output file is written
 
 	var stderr bytes.Buffer

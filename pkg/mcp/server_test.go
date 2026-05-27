@@ -1759,3 +1759,108 @@ func TestExecuteGrafanaRestoreDashboardVersionRequiresVersion(t *testing.T) {
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "version")
 }
+
+// TestBuildPandocArgsDisablesRawTeX is the Layer-1 regression guard for
+// the markdown→LaTeX raw_tex extension. With raw_tex enabled (pandoc's
+// default for the markdown reader), attacker-controlled markdown can
+// inject \input{/proc/self/environ} which xelatex resolves and typesets
+// into the PDF — a file-read/secret-exfil primitive. Disabling the
+// extension makes raw LaTeX render as literal text.
+func TestBuildPandocArgsDisablesRawTeX(t *testing.T) {
+	t.Parallel()
+	args := buildPandocArgs("/tmp/out.pdf", "xelatex", "/app/latex-templates/nx.latex", "My Report", "Nx", "/tmp/in.md")
+
+	// Must contain "-f markdown-raw_tex"; must NOT contain bare "markdown".
+	require.Contains(t, args, "-f")
+	idx := indexOfString(args, "-f")
+	require.Greater(t, len(args), idx+1)
+	require.Equal(t, "markdown-raw_tex", args[idx+1], "must explicitly disable raw_tex; bare 'markdown' lets injected LaTeX reach xelatex")
+}
+
+// TestBuildPandocArgsCarriesThroughTrustedFields verifies the helper
+// still hands pandoc the rest of what executeGeneratePDF needs — output
+// path, engine, template, the report's title, the company-name macro,
+// and the input file at the end.
+func TestBuildPandocArgsCarriesThroughTrustedFields(t *testing.T) {
+	t.Parallel()
+	args := buildPandocArgs("/tmp/out.pdf", "xelatex", "/app/latex-templates/nx.latex", "My Report", "Nx", "/tmp/in.md")
+	require.Contains(t, args, "--pdf-engine=xelatex")
+	require.Contains(t, args, "--template=/app/latex-templates/nx.latex")
+	require.Contains(t, args, "-o")
+	require.Contains(t, args, "/tmp/out.pdf")
+	require.Contains(t, args, "title=My Report")
+	require.Contains(t, args, "companyname=Nx")
+	require.Equal(t, "/tmp/in.md", args[len(args)-1], "input path must be the final positional arg")
+}
+
+// TestBuildPandocArgsOmitsTitleWhenEmpty verifies that an empty title
+// doesn't produce an empty -M title= meta var.
+func TestBuildPandocArgsOmitsTitleWhenEmpty(t *testing.T) {
+	t.Parallel()
+	args := buildPandocArgs("/tmp/out.pdf", "xelatex", "/app/latex-templates/nx.latex", "", "Nx", "/tmp/in.md")
+	for _, a := range args {
+		require.NotEqual(t, "title=", a, "empty title must not be passed as a meta var")
+	}
+}
+
+// TestBuildPandocEnvExcludesSecrets is the Layer-2 guard: even with
+// pandoc/xelatex executing, the renderer process must not see app
+// secrets. Set every known credential env var in the test environment;
+// the returned env must contain none of them.
+func TestBuildPandocEnvExcludesSecrets(t *testing.T) {
+	for _, k := range []string{"ANTHROPIC_API_KEY", "GRAFANA_API_KEY", "SLACK_BOT_TOKEN", "SLACK_APP_TOKEN", "GITHUB_TOKEN", "DATABASE_URL"} {
+		t.Setenv(k, "secret-"+k)
+	}
+
+	env := buildPandocEnv("/app/latex-templates")
+	for _, e := range env {
+		for _, secretKey := range []string{"ANTHROPIC_API_KEY", "GRAFANA_API_KEY", "SLACK_BOT_TOKEN", "SLACK_APP_TOKEN", "GITHUB_TOKEN", "DATABASE_URL"} {
+			require.False(t, strings.HasPrefix(e, secretKey+"="), "secret %s must not appear in pandoc env (got %q)", secretKey, e)
+		}
+	}
+}
+
+// TestBuildPandocEnvForwardsTexInputs verifies the legitimate
+// TEXINPUTS path is still threaded so xelatex finds .cls files.
+func TestBuildPandocEnvForwardsTexInputs(t *testing.T) {
+	t.Parallel()
+	env := buildPandocEnv("/app/latex-templates")
+	require.Contains(t, env, "TEXINPUTS=.:/app/latex-templates//:")
+}
+
+// TestBuildPandocEnvAppliesTexLiveHardening verifies the belt-and-suspenders
+// TeX Live env-var guards that block absolute/dotfile reads and writes,
+// even if a future raw-LaTeX leak slips past Layer 1.
+func TestBuildPandocEnvAppliesTexLiveHardening(t *testing.T) {
+	t.Parallel()
+	env := buildPandocEnv("/app/latex-templates")
+	require.Contains(t, env, "openin_any=p")
+	require.Contains(t, env, "openout_any=p")
+	require.Contains(t, env, "shell_escape=f")
+}
+
+// TestBuildPandocEnvCarriesPathAndLocale verifies that the variables
+// pandoc/xelatex/fontconfig genuinely need (PATH, HOME, locale) survive
+// the allowlist — otherwise pandoc can't find binaries or fonts.
+func TestBuildPandocEnvCarriesPathAndLocale(t *testing.T) {
+	t.Setenv("PATH", "/usr/local/bin:/usr/bin")
+	t.Setenv("HOME", "/home/bot")
+	t.Setenv("LANG", "en_US.UTF-8")
+	env := buildPandocEnv("/app/latex-templates")
+	require.Contains(t, env, "PATH=/usr/local/bin:/usr/bin")
+	require.Contains(t, env, "HOME=/home/bot")
+	require.Contains(t, env, "LANG=en_US.UTF-8")
+}
+
+// indexOfString is a test helper for finding a flag's position so we can
+// assert on the value that follows it (e.g. "-f" → "markdown-raw_tex").
+func indexOfString(haystack []string, needle string) (idx int) {
+	for i, s := range haystack {
+		if s == needle {
+			idx = i
+			return idx
+		}
+	}
+	idx = -1
+	return idx
+}
