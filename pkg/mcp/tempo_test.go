@@ -328,4 +328,8 @@ func TestNewTempoClient(t *testing.T) {
 	assert.Equal(t, "test", client.name)
 	assert.Equal(t, "http://tempo:3200", client.baseURL) // trailing slash stripped
 	assert.NotNil(t, client.httpClient)
+	// Per-client Transport must be set, not nil. nil falls back to
+	// http.DefaultTransport, the package-global pool — see
+	// pkg/mcp/tempo.go's NewTempoClient comment for the race this prevents.
+	assert.NotNil(t, client.httpClient.Transport, "client must have its own Transport")
 }

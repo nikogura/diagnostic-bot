@@ -33,12 +33,21 @@ type TempoClient struct {
 const tempoEndpointDefault = "default"
 
 // NewTempoClient creates a new Tempo client.
+//
+// The http.Client is given its own *http.Transport rather than relying on
+// http.DefaultTransport. The default transport is package-global, so any
+// other goroutine in the same process that calls CloseIdleConnections on
+// it (most notably parallel tests tearing down httptest.Servers) can yank
+// connections from this client's idle pool mid-request and produce a
+// "http: CloseIdleConnections called" error instead of the real response.
+// A per-client transport isolates the pool.
 func NewTempoClient(name, baseURL string, logger *slog.Logger) (client *TempoClient) {
 	client = &TempoClient{
 		name:    name,
 		baseURL: strings.TrimSuffix(baseURL, "/"),
 		httpClient: &http.Client{
-			Timeout: tempoTimeout,
+			Timeout:   tempoTimeout,
+			Transport: &http.Transport{},
 		},
 		logger: logger,
 	}

@@ -298,3 +298,21 @@ func contains(s string, sub string) (found bool) {
 	found = false
 	return found
 }
+
+// TestNewAPIClientIsolatesTransport guards the per-client Transport
+// pattern. nil falls back to http.DefaultTransport (package-global) and
+// parallel tests can yank idle connections from unrelated requests —
+// see pkg/mcp/tempo.go's NewTempoClient comment for the original failure.
+func TestNewAPIClientIsolatesTransport(t *testing.T) {
+	t.Parallel()
+	logger := slog.New(slog.NewTextHandler(os.Stderr, nil))
+	cfg := &APIConfig{
+		Endpoints: []Endpoint{{Name: "ping", Method: "GET", Path: "/ping"}},
+		RateLimit: RateLimitConfig{MaxConcurrent: 1, MaxRetries: 0},
+		Defaults:  DefaultsConfig{Limit: 1, MaxLimit: 1},
+	}
+	client := NewAPIClient(cfg, logger)
+	if client.http.Transport == nil {
+		t.Fatal("client must have its own Transport; nil falls back to http.DefaultTransport")
+	}
+}

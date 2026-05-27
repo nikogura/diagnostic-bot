@@ -51,6 +51,9 @@ func NewLokiClient(endpoint string, logger *slog.Logger) (result *LokiClient) {
 		endpoint: endpoint,
 		httpClient: &http.Client{
 			Timeout: 30 * time.Second,
+			// Per-client Transport isolates the connection pool from
+			// http.DefaultTransport (see pkg/mcp/tempo.go for context).
+			Transport: &http.Transport{},
 		},
 		logger:         logger,
 		allowedTenants: map[string]struct{}{},

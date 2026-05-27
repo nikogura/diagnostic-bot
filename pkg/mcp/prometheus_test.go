@@ -14,6 +14,16 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+// TestNewPrometheusClientIsolatesTransport guards the per-client Transport
+// pattern. See pkg/mcp/tempo.go for the failure mode this prevents.
+func TestNewPrometheusClientIsolatesTransport(t *testing.T) {
+	t.Parallel()
+	logger := slog.New(slog.NewTextHandler(os.Stdout, nil))
+	client, err := NewPrometheusClient("http://prom.example.com", logger)
+	require.NoError(t, err)
+	require.NotNil(t, client.httpClient.Transport, "client must have its own Transport; nil falls back to http.DefaultTransport")
+}
+
 // TestNewPrometheusClient tests Prometheus client initialization.
 func TestNewPrometheusClient(t *testing.T) {
 	t.Parallel()

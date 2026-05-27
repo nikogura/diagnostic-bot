@@ -112,6 +112,9 @@ func NewPrometheusClient(baseURL string, logger *slog.Logger) (client *Prometheu
 		baseURL: baseURL,
 		httpClient: &http.Client{
 			Timeout: prometheusTimeout,
+			// Per-client Transport isolates the connection pool from
+			// http.DefaultTransport (see pkg/mcp/tempo.go for context).
+			Transport: &http.Transport{},
 		},
 		logger: logger,
 	}

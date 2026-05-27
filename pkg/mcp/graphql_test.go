@@ -16,6 +16,16 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+// TestNewGraphQLClientIsolatesTransport guards the per-client Transport
+// pattern. See pkg/mcp/tempo.go for the failure mode this prevents.
+func TestNewGraphQLClientIsolatesTransport(t *testing.T) {
+	t.Parallel()
+	logger := slog.New(slog.NewTextHandler(os.Stdout, nil))
+	client, err := NewGraphQLClient("default", "http://gql.example.com", nil, nil, logger)
+	require.NoError(t, err)
+	require.NotNil(t, client.httpClient.Transport, "client must have its own Transport; nil falls back to http.DefaultTransport")
+}
+
 // TestNewGraphQLClient tests GraphQL client initialization.
 func TestNewGraphQLClient(t *testing.T) {
 	t.Parallel()

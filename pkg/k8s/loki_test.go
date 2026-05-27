@@ -209,3 +209,14 @@ func TestAllowedTenantsReturnsConfiguredList(t *testing.T) {
 	require.NoError(t, err)
 	assert.ElementsMatch(t, []string{"monitoring", "cloudtrail", "self-monitoring"}, client.AllowedTenants())
 }
+
+// TestNewLokiClientIsolatesTransport guards the per-client Transport
+// pattern. nil falls back to http.DefaultTransport (package-global) and
+// parallel tests can yank idle connections from unrelated requests —
+// see pkg/mcp/tempo.go's NewTempoClient comment for the original failure.
+func TestNewLokiClientIsolatesTransport(t *testing.T) {
+	t.Parallel()
+	logger := slog.New(slog.NewTextHandler(os.Stdout, nil))
+	client := NewLokiClient("http://loki.example.com", logger)
+	require.NotNil(t, client.httpClient.Transport, "client must have its own Transport; nil falls back to http.DefaultTransport")
+}

@@ -37,6 +37,9 @@ func NewAPIClient(config *APIConfig, logger *slog.Logger) (client *APIClient) {
 		config: config,
 		http: &http.Client{
 			Timeout: defaultHTTPTimeout,
+			// Per-client Transport isolates the connection pool from
+			// http.DefaultTransport (see pkg/mcp/tempo.go for context).
+			Transport: &http.Transport{},
 		},
 		semaphore: make(chan struct{}, config.RateLimit.MaxConcurrent),
 		logger:    logger,

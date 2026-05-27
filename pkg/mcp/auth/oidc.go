@@ -290,7 +290,12 @@ func (a *OIDCAuth) getPublicKey(kid string) (key *rsa.PublicKey, err error) {
 func (a *OIDCAuth) refreshJWKSCache() (err error) {
 	jwksURL := strings.TrimSuffix(a.issuerURL, "/") + "/keys"
 
-	client := &http.Client{Timeout: 10 * time.Second}
+	// Per-client Transport isolates the connection pool from
+	// http.DefaultTransport (see pkg/mcp/tempo.go for context).
+	client := &http.Client{
+		Timeout:   10 * time.Second,
+		Transport: &http.Transport{},
+	}
 	var req *http.Request
 	req, err = http.NewRequestWithContext(context.Background(), http.MethodGet, jwksURL, nil)
 	if err != nil {

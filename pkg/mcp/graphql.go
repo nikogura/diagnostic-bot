@@ -97,6 +97,9 @@ func NewGraphQLClient(name, url string, headers map[string]string, oauth2Config 
 		url:  url,
 		httpClient: &http.Client{
 			Timeout: graphqlTimeout,
+			// Per-client Transport isolates the connection pool from
+			// http.DefaultTransport (see pkg/mcp/tempo.go for context).
+			Transport: &http.Transport{},
 		},
 		headers:      headers,
 		logger:       logger,

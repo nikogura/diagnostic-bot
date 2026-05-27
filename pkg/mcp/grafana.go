@@ -178,6 +178,11 @@ func NewGrafanaClient(baseURL, apiKey string, logger *slog.Logger) (client *Graf
 		apiKey:  apiKey,
 		httpClient: &http.Client{
 			Timeout: 30 * time.Second,
+			// Per-client Transport isolates the connection pool from
+			// http.DefaultTransport, which is package-global and shared
+			// across the whole process. See pkg/mcp/tempo.go for the
+			// race-condition writeup that motivated this pattern.
+			Transport: &http.Transport{},
 		},
 		logger: logger,
 	}

@@ -852,6 +852,19 @@ func TestCreateDashboardFromQueriesInfinity(t *testing.T) {
 	assert.Equal(t, "infinity-dash-uid", uid)
 }
 
+// TestNewGrafanaClientIsolatesTransport guards the per-client Transport
+// pattern. Without it the client falls back to http.DefaultTransport,
+// which is package-global; parallel tests tearing down httptest.Servers
+// can yank idle connections out of unrelated tests' in-flight requests
+// (see the pkg/mcp/tempo.go comment for the original failure mode).
+func TestNewGrafanaClientIsolatesTransport(t *testing.T) {
+	t.Parallel()
+	logger := slog.New(slog.NewTextHandler(os.Stdout, nil))
+	client, err := NewGrafanaClient("http://grafana.example.com", "key", logger)
+	require.NoError(t, err)
+	require.NotNil(t, client.httpClient.Transport, "client must have its own Transport; nil falls back to http.DefaultTransport")
+}
+
 // TestBuildCloudWatchTargetSerialization verifies the marshaled JSON for a
 // CloudWatch panel target includes the query fields Grafana needs to render
 // the panel. Regression test for the bug where namespace, metricName,
