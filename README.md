@@ -581,7 +581,7 @@ The bot is configured via environment variables:
 - `MCP_JWT_SECRET` - JWT signing secret for JWT bearer token authentication
 - `MCP_JWT_ALGORITHM` - JWT algorithm (default: `HS256`, also supports `RS256`)
 - `MCP_API_KEYS` - API key authentication in format `key1:user1,key2:user2`
-- `MCP_OIDC_ISSUER` - Enables generic OIDC/JWKS auth on the MCP HTTP/SSE endpoints (e.g. `https://dex.tools.nxteam.dev`). When set, every request to `/mcp` and `/sse` must carry a signed RS256 JWT in `Authorization: Bearer …`; the bot validates the signature against the issuer's `/keys` JWKS endpoint, the `iss` claim against this URL, the `aud` claim against `MCP_OIDC_AUDIENCE`, and `exp`/`nbf`. Mutually exclusive with `GOOGLE_OAUTH_CLIENT_ID` — both-set is a startup error. **Recommended setup: [Dex + Google upstream](#dex--google-upstream-recommended).**
+- `MCP_OIDC_ISSUER` - Enables generic OIDC/JWKS auth on the MCP HTTP/SSE endpoints (e.g. `https://dex.yourdomain.com`). When set, every request to `/mcp` and `/sse` must carry a signed RS256 JWT in `Authorization: Bearer …`; the bot validates the signature against the issuer's `/keys` JWKS endpoint, the `iss` claim against this URL, the `aud` claim against `MCP_OIDC_AUDIENCE`, and `exp`/`nbf`. Mutually exclusive with `GOOGLE_OAUTH_CLIENT_ID` — both-set is a startup error. **Recommended setup: [Dex + Google upstream](#dex--google-upstream-recommended).**
 - `MCP_OIDC_AUDIENCE` - Required when `MCP_OIDC_ISSUER` is set. The IdP client ID — binds tokens to this specific client. Refusing to run without it closes the audience-binding gap.
 - `MCP_OIDC_ALLOWED_HOSTED_DOMAINS` - Comma-separated allowlist of email domains (e.g. `katn-solutions.io`). The bot derives the domain from the `@`-suffix of the JWT's `email` claim — works whether or not the IdP passes through a separate `hd` claim. Empty = no domain restriction.
 - `MCP_OIDC_ALLOWED_EMAILS` - Comma-separated allowlist of exact email addresses. Useful for "these specific humans only," typically alongside the broader hosted-domain filter. Empty = no per-email restriction.
@@ -950,7 +950,7 @@ Step 7 — Dex issues its own JWT to Claude Code
   Dex maps Google's claims into a fresh JWT it signs with its own key:
 
     {
-      "iss": "https://dex.tools.nxteam.dev",   ◄── Dex's issuer URL,
+      "iss": "https://dex.yourdomain.com",   ◄── Dex's issuer URL,
                                                    matches MCP_OIDC_ISSUER
       "sub": "<dex's internal user id>",
       "aud": "diagnostic-bot",                 ◄── matches MCP_OIDC_AUDIENCE
@@ -1037,7 +1037,7 @@ The consent screen must be configured before you can create the client. Settings
 | App name | `Diagnostic Bot (via Dex)` | What users see on the consent screen |
 | User support email | `<your support email>` | Must be a Workspace email |
 | App logo | optional | |
-| **Authorized domains** | `tools.nxteam.dev` | Top-level eTLD+1 of any redirect URI you plan to use. **One entry per top-level domain** — don't list the full URL here. |
+| **Authorized domains** | `yourdomain.com` | Top-level eTLD+1 of any redirect URI you plan to use. **One entry per top-level domain** — don't list the full URL here. |
 | Developer contact info | `<your email>` | Workspace email is fine |
 | Scopes | Add `openid`, `.../auth/userinfo.email`, `.../auth/userinfo.profile` | Non-sensitive. No verification needed for Internal apps. |
 
@@ -1061,14 +1061,14 @@ Going to **APIs & Services → Library**:
 | Application type | **Web application** | Required for the Dex-as-confidential-client model. Not "Desktop app" — that's the direct-Google path. |
 | Name | `dex-google-upstream` | Internal label; users never see it. |
 | **Authorized JavaScript origins** | (none) | Dex doesn't make browser-side JS calls. Leave empty. |
-| **Authorized redirect URIs** | `https://dex.tools.nxteam.dev/callback` | Exact match. Must be HTTPS in production. Dex's callback path is `/callback` by default — verify against your Dex deployment's `issuer:` URL. Append more entries if you have multiple Dex environments (e.g. staging + prod). |
+| **Authorized redirect URIs** | `https://dex.yourdomain.com/callback` | Exact match. Must be HTTPS in production. Dex's callback path is `/callback` by default — verify against your Dex deployment's `issuer:` URL. Append more entries if you have multiple Dex environments (e.g. staging + prod). |
 
 After saving, Google shows you the **Client ID** and **Client secret**. Both go straight into Dex's config (Step 2). Save the secret somewhere safe — Google will let you re-fetch it but you should treat it as a credential.
 
 ### Step 2: Add the Google connector + a public client for the bot to your Dex config
 
 ```yaml
-issuer: https://dex.tools.nxteam.dev   # must match MCP_OIDC_ISSUER exactly
+issuer: https://dex.yourdomain.com   # must match MCP_OIDC_ISSUER exactly
 
 connectors:
   # Your existing SSH connector for kubectl, unchanged
@@ -1083,7 +1083,7 @@ connectors:
     config:
       clientID: <dex-google-upstream-client-id>.apps.googleusercontent.com
       clientSecret: <dex-google-upstream-client-secret>   # Dex's secret to Google. Never given to users.
-      redirectURI: https://dex.tools.nxteam.dev/callback
+      redirectURI: https://dex.yourdomain.com/callback
       hostedDomains:
         - katn-solutions.io                                # Workspace-only
       # Optional: emit a `groups` claim. Requires a Workspace service
@@ -1108,7 +1108,7 @@ The `staticClients[].public: true` is what makes this a real public client — n
 ### Step 3: Bot env vars
 
 ```
-MCP_OIDC_ISSUER=https://dex.tools.nxteam.dev
+MCP_OIDC_ISSUER=https://dex.yourdomain.com
 MCP_OIDC_AUDIENCE=diagnostic-bot
 MCP_PUBLIC_URL=https://diagnostic-bot.example.com
 
@@ -1133,7 +1133,7 @@ No `--client-secret`. The `--client-id` value is just the Dex static client name
 
 1. Claude Code hits `/mcp` with no token. Bot returns `401` with `WWW-Authenticate: Bearer resource_metadata="<bot>/.well-known/oauth-protected-resource"`.
 2. Claude Code reads the metadata, discovers Dex as the authorization server.
-3. Claude Code spins up a loopback listener on `localhost:8080/callback`, opens the user's browser to `https://dex.tools.nxteam.dev/auth` with PKCE.
+3. Claude Code spins up a loopback listener on `localhost:8080/callback`, opens the user's browser to `https://dex.yourdomain.com/auth` with PKCE.
 4. Dex redirects to Google sign-in. User signs in (password + MFA + whatever Workspace policy demands).
 5. Google returns to Dex, Dex issues its own JWT, redirects to the loopback URL with an auth code.
 6. Claude Code exchanges the code for the JWT, caches it, sends it on every subsequent request.
