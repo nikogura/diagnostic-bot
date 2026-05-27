@@ -9,6 +9,8 @@ import (
 	"os"
 	"os/user"
 	"strings"
+
+	"github.com/nikogura/diagnostic-bot/pkg/mcp/auth"
 )
 
 // auditUserKey is the private context key used to override the server's
@@ -61,10 +63,21 @@ func WithAuditUser(ctx context.Context, auditUser string) (newCtx context.Contex
 	return newCtx
 }
 
-// auditUserFromContext returns the audit user for the current request:
-// the context-set override when present and non-empty, otherwise the
-// server's default resolved at construction.
+// auditUserFromContext returns the audit user for the current request.
+//
+// Precedence (highest first):
+//  1. Verified auth identity from auth.ResultFromContext — set by the
+//     HTTP auth middleware when a Google OAuth token was validated.
+//     This is the trusted-source path; the LLM cannot influence it.
+//  2. Explicit ctx override set via WithAuditUser — used by the Slack
+//     bot to inject the Slack user behind an investigation.
+//  3. Server default resolved at construction (MCP_AUDIT_USER env or
+//     process owner via user.Current()).
 func (s *Server) auditUserFromContext(ctx context.Context) (auditUser string) {
+	if r := auth.ResultFromContext(ctx); r != nil && r.Email != "" {
+		auditUser = r.Email
+		return auditUser
+	}
 	v, ok := ctx.Value(auditUserKey{}).(string)
 	if ok && v != "" {
 		auditUser = v

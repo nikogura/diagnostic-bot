@@ -13,6 +13,7 @@ import (
 	"github.com/nikogura/diagnostic-bot/pkg/bot"
 	"github.com/nikogura/diagnostic-bot/pkg/k8s"
 	"github.com/nikogura/diagnostic-bot/pkg/mcp"
+	"github.com/nikogura/diagnostic-bot/pkg/mcp/auth"
 	"github.com/nikogura/diagnostic-bot/pkg/metrics"
 )
 
@@ -212,15 +213,23 @@ func startMCPHTTPServer(ctx context.Context, githubToken string, logger *slog.Lo
 	legacyServer := mcp.NewServer(lokiClient, githubToken, nil, logger)
 	sdkServer := mcp.NewSDKServer(legacyServer)
 
+	mcpHandler := mcp.WithAuditSourceMiddleware(sdkServer.StreamableHTTPHandler())
+	sseHandler := mcp.WithAuditSourceMiddleware(sdkServer.SSEHandler())
+
+	// Optional Google OAuth: enabled when GOOGLE_OAUTH_CLIENT_ID is set.
+	// Wraps /mcp and /sse with auth.WithAuth (401 + WWW-Authenticate
+	// triggers Claude Code's browser-pop OAuth flow). Slack-bot stdio
+	// path is untouched — it never hits this listener.
+	mcpHandler, sseHandler = maybeWrapGoogleAuth(ctx, mcpHandler, sseHandler, logger)
+
 	go func() {
 		mux := http.NewServeMux()
-		// Wrap with audit-source middleware so every Grafana write logged
-		// downstream carries the originating client IP (X-Forwarded-For
-		// first hop, falling back to RemoteAddr). Port-forwarded admin
-		// traffic surfaces as 127.0.0.1; direct connections expose the
-		// real caller.
-		mux.Handle("/mcp", mcp.WithAuditSourceMiddleware(sdkServer.StreamableHTTPHandler()))
-		mux.Handle("/sse", mcp.WithAuditSourceMiddleware(sdkServer.SSEHandler()))
+		mux.Handle("/mcp", mcpHandler)
+		mux.Handle("/sse", sseHandler)
+
+		// Protected-resource metadata is served unauthenticated — clients
+		// have to read it BEFORE they have a token.
+		registerOAuthMetadataRoute(mux, logger)
 
 		logger.InfoContext(ctx, "starting MCP HTTP server",
 			slog.String("addr", mcpHTTPAddr),
@@ -232,4 +241,80 @@ func startMCPHTTPServer(ctx context.Context, githubToken string, logger *slog.Lo
 			logger.ErrorContext(ctx, "MCP HTTP server error", slog.String("error", httpErr.Error()))
 		}
 	}()
+}
+
+// maybeWrapGoogleAuth turns on Google OAuth gating when GOOGLE_OAUTH_CLIENT_ID
+// is set. Without it, the handlers are returned unwrapped — current
+// no-auth, VPC-gated behavior is preserved by default.
+func maybeWrapGoogleAuth(ctx context.Context, mcpHandler, sseHandler http.Handler, logger *slog.Logger) (mcp, sse http.Handler) {
+	mcp, sse = mcpHandler, sseHandler
+
+	clientID := getEnv("GOOGLE_OAUTH_CLIENT_ID", "")
+	if clientID == "" {
+		logger.InfoContext(ctx, "GOOGLE_OAUTH_CLIENT_ID not set — MCP HTTP/SSE will run without auth")
+		return mcp, sse
+	}
+
+	publicURL := strings.TrimRight(getEnv("MCP_PUBLIC_URL", ""), "/")
+	if publicURL == "" {
+		logger.ErrorContext(ctx, "GOOGLE_OAUTH_CLIENT_ID set but MCP_PUBLIC_URL is empty — cannot build resource_metadata URL; exiting")
+		os.Exit(1)
+	}
+
+	cfg := auth.GoogleConfig{
+		ClientID:             clientID,
+		AllowedHostedDomains: splitCSV(getEnv("GOOGLE_ALLOWED_HOSTED_DOMAINS", "")),
+		AllowedEmails:        splitCSV(getEnv("GOOGLE_ALLOWED_EMAILS", "")),
+	}
+	googleAuth, err := auth.NewGoogleAuth(cfg, logger)
+	if err != nil {
+		logger.ErrorContext(ctx, "Google OAuth configuration invalid", slog.String("error", err.Error()))
+		os.Exit(1)
+	}
+
+	resourceMetaURL := publicURL + "/.well-known/oauth-protected-resource"
+	mcp = auth.WithAuth(googleAuth, resourceMetaURL, logger)(mcpHandler)
+	sse = auth.WithAuth(googleAuth, resourceMetaURL, logger)(sseHandler)
+
+	logger.InfoContext(ctx, "Google OAuth enabled for MCP HTTP/SSE",
+		slog.String("client_id", clientID),
+		slog.Any("allowed_hosted_domains", cfg.AllowedHostedDomains),
+		slog.Int("allowed_emails_count", len(cfg.AllowedEmails)),
+		slog.String("resource_metadata_url", resourceMetaURL),
+	)
+	return mcp, sse
+}
+
+// registerOAuthMetadataRoute serves /.well-known/oauth-protected-resource
+// when Google OAuth is configured. When GOOGLE_OAUTH_CLIENT_ID is unset
+// the route is omitted entirely — there's nothing to point clients at.
+func registerOAuthMetadataRoute(mux *http.ServeMux, logger *slog.Logger) {
+	clientID := getEnv("GOOGLE_OAUTH_CLIENT_ID", "")
+	if clientID == "" {
+		return
+	}
+	publicURL := strings.TrimRight(getEnv("MCP_PUBLIC_URL", ""), "/")
+	if publicURL == "" {
+		return // already exited above; defensive
+	}
+	mux.Handle("/.well-known/oauth-protected-resource", auth.ProtectedResourceMetadataHandler(
+		publicURL+"/mcp",
+		"https://accounts.google.com",
+		[]string{"openid", "email", "profile"},
+	))
+	logger.Info("registered /.well-known/oauth-protected-resource for MCP OAuth discovery")
+}
+
+// splitCSV trims whitespace and drops empty entries from a comma-separated env value.
+func splitCSV(v string) (out []string) {
+	if v == "" {
+		return out
+	}
+	for _, p := range strings.Split(v, ",") {
+		p = strings.TrimSpace(p)
+		if p != "" {
+			out = append(out, p)
+		}
+	}
+	return out
 }

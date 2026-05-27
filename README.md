@@ -587,6 +587,10 @@ The bot is configured via environment variables:
 - `MCP_OIDC_SKIP_ISSUER_VERIFY` - Skip issuer verification (default: `false`, use only for testing)
 - `MCP_MTLS_CA_CERT_PATH` - Path to CA certificate for mutual TLS authentication
 - `MCP_MTLS_VERIFY_CLIENT` - Verify client certificates against CA (default: `true`)
+- `GOOGLE_OAUTH_CLIENT_ID` - Enables Google OAuth on the MCP HTTP/SSE endpoints. When set, every request to `/mcp` and `/sse` must carry a Google access token in `Authorization: Bearer …`; missing/invalid tokens get `401` with `WWW-Authenticate` pointing at `/.well-known/oauth-protected-resource`. Claude Code reads that, opens a browser to Google, and caches the token thereafter. The Slack-bot stdio path is unaffected — it never hits HTTP. When unset, the MCP HTTP/SSE endpoints stay unauthenticated (current VPC-gated behavior). See [Google OAuth setup](#google-oauth-setup).
+- `GOOGLE_ALLOWED_HOSTED_DOMAINS` - Comma-separated list of Google Workspace domains whose users may authenticate (e.g. `katn-solutions.io`). Empty means no domain restriction.
+- `GOOGLE_ALLOWED_EMAILS` - Optional explicit per-user email allowlist applied on top of the hosted-domain filter. Empty means no per-email restriction.
+- `MCP_PUBLIC_URL` - The externally-reachable base URL of the MCP HTTP server (e.g. `https://diagnostic-bot.example.com`). Required when `GOOGLE_OAUTH_CLIENT_ID` is set — used to construct the `resource_metadata` URL Claude Code follows.
 
 **Tool Backing Services** (each enables a set of MCP tools — see [Tool Categories](#tool-categories)):
 - `LOKI_ENDPOINT` - Loki gateway endpoint (enables `query_loki`)
@@ -755,6 +759,57 @@ Bot: Root cause identified:
 
      Resolution: Update config to reference tag 0.0.673
 ```
+
+## Google OAuth setup
+
+The MCP HTTP/SSE endpoints can be gated behind Google OAuth so only authenticated Workspace users can connect. When enabled, Claude Code pops a browser on first connection, the user signs in with Google, and the token is cached for the session. Every Grafana write then carries the verified email as the audit identity (visible in Grafana's version history).
+
+The Slack-bot path is unaffected — it uses stdio, never HTTP.
+
+### One-time Google Cloud Console setup
+
+1. APIs & Services → Credentials → **Create Credentials** → **OAuth client ID**.
+2. Application type: **Desktop app** (Web app types don't allow `http://localhost` redirects, which Claude Code requires for the loopback callback).
+3. Name it something like `diagnostic-bot-mcp`.
+4. Note the **Client ID** (looks like `123456-abc.apps.googleusercontent.com`). You don't need the client secret — PKCE handles that.
+5. OAuth consent screen: set User Type to **Internal** (restricts auth to your Workspace domain) if you don't want external Google accounts able to attempt sign-in.
+
+### Bot-side configuration
+
+Set these env vars on the bot:
+
+```
+GOOGLE_OAUTH_CLIENT_ID=<your-id>.apps.googleusercontent.com
+GOOGLE_ALLOWED_HOSTED_DOMAINS=katn-solutions.io
+MCP_PUBLIC_URL=https://diagnostic-bot.example.com
+```
+
+Optional finer-grained control:
+
+```
+GOOGLE_ALLOWED_EMAILS=alice@katn-solutions.io,bob@katn-solutions.io
+```
+
+When `GOOGLE_OAUTH_CLIENT_ID` is unset, the MCP HTTP/SSE endpoints stay unauthenticated (current VPC-gated behavior).
+
+### Client-side `.mcp.json`
+
+Each user adds the server to Claude Code with the same client ID:
+
+```bash
+claude mcp add diagnostic-bot https://diagnostic-bot.example.com/mcp --client-id=<your-id>.apps.googleusercontent.com
+```
+
+On first use, Claude Code:
+1. Sends a request to `/mcp` with no token.
+2. Receives `401` with `WWW-Authenticate: Bearer resource_metadata="https://diagnostic-bot.example.com/.well-known/oauth-protected-resource"`.
+3. Fetches that metadata, discovers Google as the authorization server.
+4. Spins up a loopback listener on a random local port.
+5. Opens the user's default browser to Google's sign-in page (with PKCE).
+6. After successful sign-in, captures the auth code from the loopback redirect, exchanges it for an access token.
+7. Re-sends the request to `/mcp` with `Authorization: Bearer <token>` — and caches the token for subsequent requests.
+
+The bot validates the token against Google's `userinfo` endpoint (cached for 5 minutes by default), enforces the hosted-domain / email allowlists, and stamps the verified email onto every audit-logged write.
 
 ## Security
 
