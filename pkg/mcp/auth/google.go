@@ -46,6 +46,23 @@ type GoogleConfig struct {
 	// the hosted-domain filter. Empty means no per-email restriction.
 	AllowedEmails []string
 
+	// Allowed*File fields, when non-empty, point at a file mounted from
+	// a Kubernetes ConfigMap whose contents replace the matching static
+	// slice. Same semantics as the OIDC equivalents (see OIDCConfig):
+	// stat-on-every-call + mtime cache + fail-closed on unreadable +
+	// empty-file = no restriction + file wins over static when both
+	// are set. File contents go through splitList, so a YAML `|-` block
+	// scalar mounted from a ConfigMap parses identically to a
+	// comma-separated env var.
+	//
+	// Hot-reload only works correctly because Authenticate now applies
+	// the allowlist on every request (against either a cached or fresh
+	// userinfo identity) instead of caching the final authorized result.
+	// A user revoked from the file is denied on their next request, not
+	// after the userinfo cache TTL elapses.
+	AllowedHostedDomainsFile string
+	AllowedEmailsFile        string
+
 	// UserInfoURL is the endpoint hit to validate tokens. Defaults to
 	// Google's standard endpoint; tests override.
 	UserInfoURL string
@@ -70,10 +87,14 @@ type googleUserInfo struct {
 	Name          string `json:"name"`
 }
 
-// cachedAuth holds a validated token's identity plus the deadline at
-// which it must be re-checked with Google.
-type cachedAuth struct {
-	result  *Result
+// cachedIdentity holds the Google userinfo response for a validated
+// token plus the deadline at which the token must be re-checked. We
+// cache the identity (the expensive thing: a network roundtrip to
+// Google) and re-run the allowlist check on every Authenticate, so a
+// user removed from a file-backed allowlist is denied on their next
+// request rather than waiting out the userinfo cache TTL.
+type cachedIdentity struct {
+	info    googleUserInfo
 	expires time.Time
 }
 
@@ -87,8 +108,17 @@ type GoogleAuth struct {
 	config GoogleConfig
 	logger *slog.Logger
 
+	// cache memoizes Google userinfo lookups by token hash. The cached
+	// value is the identity (subject, email, hd) — not an authorized
+	// Result — so allowlist enforcement runs on every Authenticate.
 	cacheMu sync.Mutex
-	cache   map[string]cachedAuth
+	cache   map[string]cachedIdentity
+
+	// listSource is the file-backed allowlist cache shared with
+	// OIDCAuth. Embedded so its `current` method is callable directly
+	// and counters surface as promoted fields for tests. See
+	// listsource.go.
+	listSource
 }
 
 // NewGoogleAuth validates the config and returns a ready Method.
@@ -115,8 +145,9 @@ func NewGoogleAuth(config GoogleConfig, logger *slog.Logger) (auth *GoogleAuth, 
 	auth = &GoogleAuth{
 		config: config,
 		logger: logger,
-		cache:  map[string]cachedAuth{},
+		cache:  map[string]cachedIdentity{},
 	}
+	auth.listCache = map[string]listCacheEntry{}
 	return auth, err
 }
 
@@ -127,7 +158,16 @@ func (g *GoogleAuth) Name() (name string) {
 }
 
 // Authenticate validates the request's bearer token against Google's
-// userinfo endpoint and applies the configured hd-domain / email allowlists.
+// userinfo endpoint and applies the configured hd-domain / email
+// allowlists.
+//
+// Cache shape: we memoize the userinfo identity (subject, email, hd)
+// keyed by token hash, not the authorized Result. Allowlist enforcement
+// then runs on every call against either the cached identity or a
+// freshly-fetched one. This is what makes file-backed allowlists hot-
+// reloadable on the Google path — a user removed from the file is
+// denied on their very next request, not after the 5-minute userinfo
+// cache expires.
 func (g *GoogleAuth) Authenticate(r *http.Request) (result *Result, err error) {
 	var token string
 	token, err = extractBearerToken(r)
@@ -135,18 +175,14 @@ func (g *GoogleAuth) Authenticate(r *http.Request) (result *Result, err error) {
 		return result, err
 	}
 
-	// Cache hit short-circuit: same token, still inside TTL.
 	cacheKey := hashToken(token)
-	cached, found := g.cacheGet(cacheKey)
-	if found {
-		result = cached
-		return result, err
-	}
-
-	var info googleUserInfo
-	info, err = g.callUserInfo(r.Context(), token)
-	if err != nil {
-		return result, err
+	info, hit := g.cacheGetIdentity(cacheKey)
+	if !hit {
+		info, err = g.callUserInfo(r.Context(), token)
+		if err != nil {
+			return result, err
+		}
+		g.cachePutIdentity(cacheKey, info)
 	}
 
 	err = g.enforceAllowLists(info)
@@ -161,7 +197,6 @@ func (g *GoogleAuth) Authenticate(r *http.Request) (result *Result, err error) {
 		Email:         info.Email,
 		Subject:       info.Sub,
 	}
-	g.cachePut(cacheKey, result)
 	return result, err
 }
 
@@ -208,16 +243,36 @@ func (g *GoogleAuth) callUserInfo(ctx context.Context, token string) (info googl
 }
 
 // enforceAllowLists applies the hosted-domain and per-email allowlists.
-// Empty allowlist means "no restriction" for that axis.
+// Empty allowlist means "no restriction" for that axis. File-backed
+// allowlists are resolved per-call via the embedded listSource, so a
+// ConfigMap edit takes effect on the next request rather than after
+// the userinfo cache TTL.
 func (g *GoogleAuth) enforceAllowLists(info googleUserInfo) (err error) {
-	if len(g.config.AllowedHostedDomains) > 0 {
-		if !slices.Contains(g.config.AllowedHostedDomains, info.HostedDomain) {
+	domains, domainsErr := g.current(g.config.AllowedHostedDomainsFile, g.config.AllowedHostedDomains)
+	if domainsErr != nil {
+		g.logger.Error("Google allowed-hosted-domains file unreadable; failing closed",
+			slog.String("file", g.config.AllowedHostedDomainsFile),
+			slog.String("err", domainsErr.Error()))
+		err = fmt.Errorf("allowed-hosted-domains file unreadable: %w", domainsErr)
+		return err
+	}
+	if len(domains) > 0 {
+		if !slices.Contains(domains, info.HostedDomain) {
 			err = fmt.Errorf("hosted domain %q is not in the allowed list", info.HostedDomain)
 			return err
 		}
 	}
-	if len(g.config.AllowedEmails) > 0 {
-		if !slices.Contains(g.config.AllowedEmails, info.Email) {
+
+	emails, emailsErr := g.current(g.config.AllowedEmailsFile, g.config.AllowedEmails)
+	if emailsErr != nil {
+		g.logger.Error("Google allowed-emails file unreadable; failing closed",
+			slog.String("file", g.config.AllowedEmailsFile),
+			slog.String("err", emailsErr.Error()))
+		err = fmt.Errorf("allowed-emails file unreadable: %w", emailsErr)
+		return err
+	}
+	if len(emails) > 0 {
+		if !slices.Contains(emails, info.Email) {
 			err = fmt.Errorf("email %q is not in the allowed list", info.Email)
 			return err
 		}
@@ -225,29 +280,31 @@ func (g *GoogleAuth) enforceAllowLists(info googleUserInfo) (err error) {
 	return err
 }
 
-// cacheGet returns a cached Result if the entry exists and hasn't expired.
-func (g *GoogleAuth) cacheGet(key string) (result *Result, found bool) {
+// cacheGetIdentity returns a cached userinfo identity if the entry
+// exists and hasn't expired.
+func (g *GoogleAuth) cacheGetIdentity(key string) (info googleUserInfo, found bool) {
 	g.cacheMu.Lock()
 	defer g.cacheMu.Unlock()
 	entry, ok := g.cache[key]
 	if !ok {
-		return result, found
+		return info, found
 	}
 	if time.Now().After(entry.expires) {
 		delete(g.cache, key)
-		return result, found
+		return info, found
 	}
-	result = entry.result
+	info = entry.info
 	found = true
-	return result, found
+	return info, found
 }
 
-// cachePut stores a Result against a hashed token key with a TTL deadline.
-func (g *GoogleAuth) cachePut(key string, result *Result) {
+// cachePutIdentity stores a userinfo identity against a hashed token
+// key with a TTL deadline.
+func (g *GoogleAuth) cachePutIdentity(key string, info googleUserInfo) {
 	g.cacheMu.Lock()
 	defer g.cacheMu.Unlock()
-	g.cache[key] = cachedAuth{
-		result:  result,
+	g.cache[key] = cachedIdentity{
+		info:    info,
 		expires: time.Now().Add(g.config.CacheTTL),
 	}
 }

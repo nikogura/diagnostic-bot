@@ -23,11 +23,26 @@ type OIDCAuth struct {
 	allowedGroups        []string
 	allowedHostedDomains []string
 	allowedEmails        []string
-	jwksCacheTime        int
-	skipIssuerVerify     bool
-	logger               *slog.Logger
-	jwksCache            map[string]*rsa.PublicKey
-	jwksCacheExp         time.Time
+
+	// When non-empty, the file at this path is the source of truth for
+	// the corresponding allowlist axis. The static slice above is ignored
+	// in that case. See currentList for the per-request semantics and
+	// (file-unreadable → fail closed) policy.
+	allowedGroupsFile        string
+	allowedHostedDomainsFile string
+	allowedEmailsFile        string
+
+	jwksCacheTime    int
+	skipIssuerVerify bool
+	logger           *slog.Logger
+	jwksCache        map[string]*rsa.PublicKey
+	jwksCacheExp     time.Time
+
+	// listSource is the file-backed allowlist cache shared with
+	// GoogleAuth. Embedded anonymously so its fields and `current`
+	// method promote — keeps the call sites in validate* readable
+	// and tests on the counters straightforward. See listsource.go.
+	listSource
 }
 
 // OIDCConfig holds OIDC configuration.
@@ -60,6 +75,24 @@ type OIDCConfig struct {
 	// Empty = no per-email restriction.
 	AllowedEmails []string
 
+	// Allowed*File fields, when non-empty, point at a file mounted from
+	// a Kubernetes ConfigMap (or any other source) whose contents
+	// replace the matching Allowed* static slice. The file is read at
+	// request time so that ConfigMap edits propagate without a pod
+	// restart. Failure modes:
+	//   - file missing/unreadable → fail closed on that axis (deny all,
+	//     log ERROR on every request). Don't silently widen.
+	//   - file empty → no restriction on that axis (same semantic as an
+	//     empty env var). Preserves env-var symmetry; means deleting the
+	//     data key from the ConfigMap widens the policy on that axis,
+	//     which is the expected behavior but worth knowing.
+	// File contents go through the same whitespace-tolerant parser as
+	// the env-var form, so a YAML `|-` block scalar parses identically
+	// to a comma-separated value.
+	AllowedGroupsFile        string
+	AllowedHostedDomainsFile string
+	AllowedEmailsFile        string
+
 	JWKSCacheTime    int // seconds
 	SkipIssuerVerify bool
 }
@@ -85,16 +118,20 @@ func NewOIDCAuth(config *OIDCConfig, logger *slog.Logger) (auth *OIDCAuth) {
 	}
 
 	auth = &OIDCAuth{
-		issuerURL:            config.IssuerURL,
-		audience:             config.Audience,
-		allowedGroups:        config.AllowedGroups,
-		allowedHostedDomains: config.AllowedHostedDomains,
-		allowedEmails:        config.AllowedEmails,
-		jwksCacheTime:        config.JWKSCacheTime,
-		skipIssuerVerify:     config.SkipIssuerVerify,
-		logger:               logger,
-		jwksCache:            make(map[string]*rsa.PublicKey),
+		issuerURL:                config.IssuerURL,
+		audience:                 config.Audience,
+		allowedGroups:            config.AllowedGroups,
+		allowedHostedDomains:     config.AllowedHostedDomains,
+		allowedEmails:            config.AllowedEmails,
+		allowedGroupsFile:        config.AllowedGroupsFile,
+		allowedHostedDomainsFile: config.AllowedHostedDomainsFile,
+		allowedEmailsFile:        config.AllowedEmailsFile,
+		jwksCacheTime:            config.JWKSCacheTime,
+		skipIssuerVerify:         config.SkipIssuerVerify,
+		logger:                   logger,
+		jwksCache:                make(map[string]*rsa.PublicKey),
 	}
+	auth.listCache = map[string]listCacheEntry{}
 	return auth
 }
 
@@ -288,7 +325,15 @@ func (a *OIDCAuth) validateAuthorization(result *Result) (err error) {
 // when an upstream Google connector emits one — the email-suffix derivation
 // works uniformly across IdPs.
 func (a *OIDCAuth) validateHostedDomain(result *Result) (err error) {
-	if len(a.allowedHostedDomains) == 0 {
+	allowed, listErr := a.current(a.allowedHostedDomainsFile, a.allowedHostedDomains)
+	if listErr != nil {
+		a.logger.Error("OIDC allowed-hosted-domains file unreadable; failing closed",
+			slog.String("file", a.allowedHostedDomainsFile),
+			slog.String("err", listErr.Error()))
+		err = fmt.Errorf("allowed-hosted-domains file unreadable: %w", listErr)
+		return err
+	}
+	if len(allowed) == 0 {
 		return err
 	}
 	at := strings.LastIndex(result.Email, "@")
@@ -297,22 +342,30 @@ func (a *OIDCAuth) validateHostedDomain(result *Result) (err error) {
 		return err
 	}
 	domain := result.Email[at+1:]
-	for _, allowed := range a.allowedHostedDomains {
-		if domain == allowed {
+	for _, a := range allowed {
+		if domain == a {
 			return err
 		}
 	}
-	err = fmt.Errorf("hosted domain %q is not in the allowed list %v", domain, a.allowedHostedDomains)
+	err = fmt.Errorf("hosted domain %q is not in the allowed list %v", domain, allowed)
 	return err
 }
 
 // validateEmailAllowlist enforces the per-user email allowlist.
 func (a *OIDCAuth) validateEmailAllowlist(result *Result) (err error) {
-	if len(a.allowedEmails) == 0 {
+	allowed, listErr := a.current(a.allowedEmailsFile, a.allowedEmails)
+	if listErr != nil {
+		a.logger.Error("OIDC allowed-emails file unreadable; failing closed",
+			slog.String("file", a.allowedEmailsFile),
+			slog.String("err", listErr.Error()))
+		err = fmt.Errorf("allowed-emails file unreadable: %w", listErr)
 		return err
 	}
-	for _, allowed := range a.allowedEmails {
-		if result.Email == allowed {
+	if len(allowed) == 0 {
+		return err
+	}
+	for _, a := range allowed {
+		if result.Email == a {
 			return err
 		}
 	}
@@ -324,11 +377,19 @@ func (a *OIDCAuth) validateEmailAllowlist(result *Result) (err error) {
 // IdP to emit a `groups` claim — Dex with Google upstream and DWD, Dex
 // with LDAP, Keycloak with realm roles, etc. Empty list = any groups.
 func (a *OIDCAuth) validateGroupMembership(result *Result) (err error) {
-	if len(a.allowedGroups) == 0 {
+	allowed, listErr := a.current(a.allowedGroupsFile, a.allowedGroups)
+	if listErr != nil {
+		a.logger.Error("OIDC allowed-groups file unreadable; failing closed",
+			slog.String("file", a.allowedGroupsFile),
+			slog.String("err", listErr.Error()))
+		err = fmt.Errorf("allowed-groups file unreadable: %w", listErr)
+		return err
+	}
+	if len(allowed) == 0 {
 		return err
 	}
 	for _, userGroup := range result.Groups {
-		for _, allowedGroup := range a.allowedGroups {
+		for _, allowedGroup := range allowed {
 			if userGroup == allowedGroup {
 				a.logger.Debug("user authorized via group membership",
 					slog.String("username", result.Username),
@@ -338,7 +399,7 @@ func (a *OIDCAuth) validateGroupMembership(result *Result) (err error) {
 		}
 	}
 	err = fmt.Errorf("user %s not in any allowed groups %v, user groups: %v",
-		result.Username, a.allowedGroups, result.Groups)
+		result.Username, allowed, result.Groups)
 	return err
 }
 

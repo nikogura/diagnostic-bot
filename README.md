@@ -586,6 +586,9 @@ The bot is configured via environment variables:
 - `MCP_OIDC_ALLOWED_HOSTED_DOMAINS` - Allowlist of email domains (e.g. `katn-solutions.io`). The bot derives the domain from the `@`-suffix of the JWT's `email` claim — works whether or not the IdP passes through a separate `hd` claim. Empty = no domain restriction. Entries are separated by commas or any whitespace (newlines, tabs, spaces) — see the YAML `|-` block example in [Step 3](#step-3-bot-env-vars) for the readable multi-line form.
 - `MCP_OIDC_ALLOWED_EMAILS` - Allowlist of exact email addresses. Useful for "these specific humans only," typically alongside the broader hosted-domain filter. Empty = no per-email restriction. Same separator rules as `MCP_OIDC_ALLOWED_HOSTED_DOMAINS`.
 - `MCP_OIDC_ALLOWED_GROUPS` - Groups the user must be a member of (matched against the `groups` claim in the JWT). Empty means any authenticated user is allowed. Requires the IdP to emit the `groups` claim — for Google upstream, this requires Workspace Admin SDK access via domain-wide delegation; skip this knob if you don't have DWD configured. Same separator rules as `MCP_OIDC_ALLOWED_HOSTED_DOMAINS`.
+- `MCP_OIDC_ALLOWED_EMAILS_FILE` - Path to a file whose contents replace `MCP_OIDC_ALLOWED_EMAILS`. Read at request time, mtime-cached so the per-request cost is one `stat`. Edits to the file (typically a ConfigMap mount) propagate without a pod restart. File-missing or file-unreadable fails closed on this axis (deny all + ERROR log per request) rather than silently widening. Empty file = no restriction, matching the env-var semantic. When set, the static `MCP_OIDC_ALLOWED_EMAILS` env var is ignored. See [Hot-reload from a ConfigMap](#hot-reload-allowlists-from-a-configmap) for the deployment shape.
+- `MCP_OIDC_ALLOWED_HOSTED_DOMAINS_FILE` - Same pattern as `MCP_OIDC_ALLOWED_EMAILS_FILE` for the hosted-domain axis.
+- `MCP_OIDC_ALLOWED_GROUPS_FILE` - Same pattern as `MCP_OIDC_ALLOWED_EMAILS_FILE` for the group axis. Groups churn far less than email lists; this knob exists for symmetry — most deployments don't need it.
 - `MCP_OIDC_JWKS_CACHE_SECONDS` - How long to cache the JWKS document. Default `300`.
 - `MCP_OIDC_SKIP_ISSUER_VERIFY` - Skip issuer verification (default: `false`, use only for testing).
 - `MCP_MTLS_CA_CERT_PATH` - Path to CA certificate for mutual TLS authentication
@@ -593,6 +596,8 @@ The bot is configured via environment variables:
 - `GOOGLE_OAUTH_CLIENT_ID` - Enables Google OAuth on the MCP HTTP/SSE endpoints. When set, every request to `/mcp` and `/sse` must carry a Google access token in `Authorization: Bearer …`; missing/invalid tokens get `401` with `WWW-Authenticate` pointing at `/.well-known/oauth-protected-resource`. Claude Code reads that, opens a browser to Google, and caches the token thereafter. The Slack-bot stdio path is unaffected — it never hits HTTP. When unset, the MCP HTTP/SSE endpoints stay unauthenticated (current VPC-gated behavior). See [Google OAuth setup](#google-oauth-setup).
 - `GOOGLE_ALLOWED_HOSTED_DOMAINS` - Allowlist of Google Workspace domains whose users may authenticate (e.g. `katn-solutions.io`). Empty means no domain restriction. Entries are separated by commas or any whitespace (newlines, tabs, spaces).
 - `GOOGLE_ALLOWED_EMAILS` - Optional explicit per-user email allowlist applied on top of the hosted-domain filter. Empty means no per-email restriction. Same separator rules as `GOOGLE_ALLOWED_HOSTED_DOMAINS`.
+- `GOOGLE_ALLOWED_EMAILS_FILE` - Path to a file whose contents replace `GOOGLE_ALLOWED_EMAILS`. Hot-reloadable: edits propagate without a pod restart. Same semantics as `MCP_OIDC_ALLOWED_EMAILS_FILE` (stat-on-every-call + mtime cache + fail-closed on unreadable + file wins over the static env var). The Google path's userinfo cache holds the identity only; the allowlist check runs per request, so revocation effective on the next request. See [Direct Google OAuth — Bot env vars](#bot-env-vars-1) for the deployment shape.
+- `GOOGLE_ALLOWED_HOSTED_DOMAINS_FILE` - Same pattern as `GOOGLE_ALLOWED_EMAILS_FILE` for the hosted-domain axis.
 - `MCP_PUBLIC_URL` - The externally-reachable base URL of the MCP HTTP server (e.g. `https://diagnostic-bot.example.com`). Required when `GOOGLE_OAUTH_CLIENT_ID` is set — used to construct the `resource_metadata` URL Claude Code follows.
 
 **Tool Backing Services** (each enables a set of MCP tools — see [Tool Categories](#tool-categories)):
@@ -1009,6 +1014,9 @@ Step 9 — Claude Code retries the bot with the token
                                      │      MCP_OIDC_ALLOWED_HOSTED_DOMAINS
                                      │   8. Checks email against
                                      │      MCP_OIDC_ALLOWED_EMAILS
+                                     │      (or the contents of
+                                     │      MCP_OIDC_ALLOWED_EMAILS_FILE,
+                                     │      re-read on every request)
                                      │   9. (Optionally) checks groups
                                      ▼
                             request runs, audit identity = "alice@katn-solutions.io"
@@ -1111,6 +1119,10 @@ The `staticClients[].public: true` is what makes this a real public client — n
 
 ### Step 3: Bot env vars
 
+Two ways to express the authorization knobs — pick one per axis. The static-env form is fine for a handful of entries that rarely change; the file form lets you edit the list in gitops and have the running pod pick it up without a restart.
+
+**Static env vars (simple, requires pod restart to edit):**
+
 ```
 MCP_OIDC_ISSUER=https://dex.yourdomain.com
 MCP_OIDC_AUDIENCE=diagnostic-bot
@@ -1121,6 +1133,20 @@ MCP_OIDC_ALLOWED_HOSTED_DOMAINS=katn-solutions.io                 # broad
 MCP_OIDC_ALLOWED_EMAILS=alice@katn-solutions.io,bob@katn-solutions.io   # narrow, optional
 # MCP_OIDC_ALLOWED_GROUPS=sre,platform                            # only if Dex emits groups
 ```
+
+**File-backed (hot-reload, recommended once the email list grows past two or three entries):**
+
+```
+MCP_OIDC_ISSUER=https://dex.yourdomain.com
+MCP_OIDC_AUDIENCE=diagnostic-bot
+MCP_PUBLIC_URL=https://diagnostic-bot.example.com
+
+MCP_OIDC_ALLOWED_HOSTED_DOMAINS=katn-solutions.io                          # static — domains rarely change
+MCP_OIDC_ALLOWED_EMAILS_FILE=/etc/diagnostic-bot/oidc/allowed-emails       # hot-reloadable
+# (drop MCP_OIDC_ALLOWED_EMAILS — the file replaces it; if both are set, the file wins)
+```
+
+The file approach needs a ConfigMap and a mount — see [Hot-reload allowlists from a ConfigMap](#hot-reload-allowlists-from-a-configmap) below for the full deployment YAML. Axes mix freely: keep `MCP_OIDC_ALLOWED_HOSTED_DOMAINS` as a static env (it almost never changes) and put just the email list in a file.
 
 When `MCP_OIDC_ISSUER` is unset, the OIDC path is off. Both `MCP_OIDC_ISSUER` and `GOOGLE_OAUTH_CLIENT_ID` set simultaneously is a startup error — pick exactly one.
 
@@ -1144,6 +1170,68 @@ env:
 ```
 
 Both forms parse identically — pick whichever reads better at the size you're at. Mixed forms (commas *and* newlines in the same value) also work, which is convenient when a block scalar leaves stray indentation. Empty entries are dropped.
+
+#### Hot-reload allowlists from a ConfigMap
+
+The env-var approach above is simple, but every team-membership change requires a Deployment edit and pod restart. If you'd rather edit the list in gitops and have the running pod pick it up automatically, point the bot at a file instead:
+
+```yaml
+# clusters/<env>/diagnostic-bot/configmap-oidc-allowlist.yaml
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: diagnostic-bot-oidc-allowlist
+  namespace: diagnostic-bot
+data:
+  allowed-emails: |-
+    alice@katn-solutions.io
+    bob@katn-solutions.io
+    carol@katn-solutions.io
+```
+
+```yaml
+# clusters/<env>/diagnostic-bot/deployment.yaml — container env + mount
+env:
+  - name: MCP_OIDC_ALLOWED_HOSTED_DOMAINS
+    value: katn-solutions.io
+
+  - name: MCP_OIDC_ALLOWED_EMAILS_FILE
+    value: /etc/diagnostic-bot/oidc/allowed-emails
+  # drop MCP_OIDC_ALLOWED_EMAILS — the file replaces it
+
+volumeMounts:
+  - name: oidc-allowlist
+    mountPath: /etc/diagnostic-bot/oidc
+    readOnly: true
+
+volumes:
+  - name: oidc-allowlist
+    configMap:
+      name: diagnostic-bot-oidc-allowlist
+```
+
+How the propagation works: edit `data.allowed-emails` in gitops → Flux (or whatever you use) applies the new ConfigMap → kubelet refreshes the mount via its atomic `..data` symlink swap (~60 s) → the bot's next OIDC `Authenticate` call stats the file, sees a new mtime, re-reads, and applies the new list. No pod restart, no rollout. Per-request cost is one `stat` syscall when the file hasn't changed; the parsed list is mtime-cached.
+
+Behavior matrix:
+
+| `…_FILE` env | `…` env | Result |
+|---|---|---|
+| unset | unset | no restriction on that axis |
+| unset | set | static list from env var (legacy path) |
+| set, file readable | either | dynamic list from file (file wins, env ignored) |
+| set, file readable but empty | either | no restriction on that axis (matches env-var semantic — deleting the ConfigMap data key widens the policy) |
+| set, file missing or unreadable | either | **fail closed** on that axis (deny all) + ERROR log per request |
+
+The same `_FILE` suffix works on `MCP_OIDC_ALLOWED_HOSTED_DOMAINS_FILE` and `MCP_OIDC_ALLOWED_GROUPS_FILE`. Mix freely — e.g. keep `MCP_OIDC_ALLOWED_HOSTED_DOMAINS` as a static env (it almost never changes) and put just the email list in a file.
+
+The bot logs the active source on startup so the operator never has to wonder:
+
+```
+OIDC auth enabled for MCP HTTP/SSE
+  emails_from_file=true emails_file=/etc/diagnostic-bot/oidc/allowed-emails
+  hosted_domains_from_file=false allowed_hosted_domains=[katn-solutions.io]
+  ...
+```
 
 ### Step 4: How each user adds the server to Claude Code
 
@@ -1171,7 +1259,8 @@ Subsequent invocations of Claude Code reuse the cached token until expiry. Revok
 | Action | Where | Time-to-effect |
 |---|---|---|
 | Suspend user in Google Workspace | Workspace Admin → Users → Suspend | Next Dex token refresh (typically ≤ 24h). Instant if you also revoke the user's Dex refresh tokens in Dex's storage. |
-| Remove user from `MCP_OIDC_ALLOWED_EMAILS` | Bot env var, redeploy bot | Next request after pod restart. |
+| Remove user from the allowed-emails ConfigMap | Edit `diagnostic-bot-oidc-allowlist` data key, commit | ConfigMap mount sync time (~60 s) + next request. No pod restart. This is the everyday "person left the team" workflow when `MCP_OIDC_ALLOWED_EMAILS_FILE` is in use. |
+| Remove user from `MCP_OIDC_ALLOWED_EMAILS` | Bot env var, redeploy bot | Next request after pod restart. The static-env-var path, when not using `MCP_OIDC_ALLOWED_EMAILS_FILE`. |
 | Pull `diagnostic-bot` from Dex `staticClients` | Edit Dex config, redeploy Dex | Next refresh from any user. Already-issued JWTs stay valid until their `exp`. |
 | Revoke Dex's Google OAuth app | Google Cloud Console → Credentials → Delete | Every Dex user locked out instantly. Catastrophic-failure / incident-response lever; not for routine revocation. |
 | Tighten `MCP_OIDC_ALLOWED_HOSTED_DOMAINS` | Bot env var, redeploy bot | Next request after pod restart. |
@@ -1181,12 +1270,15 @@ The everyday "person left, lock them out" workflow is **suspend in Workspace Adm
 
 ### Allowlist patterns
 
+Either the static env-var form or the file-backed form expresses each pattern below — they're interchangeable from a policy standpoint. Use the file form (`…_FILE` variant + ConfigMap) for any list that changes more than once a quarter; use the static form for things that effectively never change (the hosted domain).
+
 | Goal | Config |
 |---|---|
-| Anyone in the Workspace | `MCP_OIDC_ALLOWED_HOSTED_DOMAINS=katn-solutions.io` |
-| Two specific humans, no one else | `MCP_OIDC_ALLOWED_EMAILS=alice@katn-solutions.io,bob@katn-solutions.io` |
+| Anyone in the Workspace | `MCP_OIDC_ALLOWED_HOSTED_DOMAINS=katn-solutions.io` (one-line static is fine — domains don't churn) |
+| A small, stable list of specific humans | `MCP_OIDC_ALLOWED_EMAILS=alice@katn-solutions.io,bob@katn-solutions.io` |
+| A growing/churning list of specific humans | `MCP_OIDC_ALLOWED_EMAILS_FILE=/etc/diagnostic-bot/oidc/allowed-emails` backed by a ConfigMap — edit the CM in gitops, no pod restart |
 | Anyone in the SRE Google Group, no one else | DWD setup + `MCP_OIDC_ALLOWED_GROUPS=sre@katn-solutions.io` |
-| Anyone in Workspace, but Grafana writes only from specific humans | Set both `MCP_OIDC_ALLOWED_HOSTED_DOMAINS` and `MCP_OIDC_ALLOWED_EMAILS` |
+| Anyone in Workspace, plus an explicit per-human allowlist on top | Set both `MCP_OIDC_ALLOWED_HOSTED_DOMAINS` (static) and `MCP_OIDC_ALLOWED_EMAILS_FILE` (file-backed) — domain as the broad gate, emails as the narrow one |
 
 ### Why this design is clean
 
@@ -1231,11 +1323,85 @@ The "secret" can't be kept confidential in a distributed CLI — Google's own do
 
 ### Bot env vars
 
+Same two styles as the Dex path — pick per axis.
+
+**Static env vars (simple, requires pod restart to edit):**
+
 ```
 GOOGLE_OAUTH_CLIENT_ID=<your-id>.apps.googleusercontent.com
 GOOGLE_ALLOWED_HOSTED_DOMAINS=katn-solutions.io
 GOOGLE_ALLOWED_EMAILS=alice@katn-solutions.io,bob@katn-solutions.io   # optional
 MCP_PUBLIC_URL=https://diagnostic-bot.example.com
+```
+
+**File-backed (hot-reload, recommended once the email list grows):**
+
+```
+GOOGLE_OAUTH_CLIENT_ID=<your-id>.apps.googleusercontent.com
+GOOGLE_ALLOWED_HOSTED_DOMAINS=katn-solutions.io                            # static — domains rarely change
+GOOGLE_ALLOWED_EMAILS_FILE=/etc/diagnostic-bot/oauth/allowed-emails        # hot-reloadable
+MCP_PUBLIC_URL=https://diagnostic-bot.example.com
+# (drop GOOGLE_ALLOWED_EMAILS — the file replaces it; if both are set, the file wins)
+```
+
+The file form needs a ConfigMap and a mount — same shape as the Dex path. New env vars:
+
+| Var | Effect |
+|---|---|
+| `GOOGLE_ALLOWED_EMAILS_FILE` | Path to a file whose contents replace `GOOGLE_ALLOWED_EMAILS`. Edits to the file (typically a ConfigMap mount) propagate without a pod restart. |
+| `GOOGLE_ALLOWED_HOSTED_DOMAINS_FILE` | Same pattern for the hosted-domain axis. |
+
+Same semantics as the OIDC `_FILE` variants: stat-on-every-call + mtime cache + fail-closed on unreadable + empty-file = no restriction + file wins over static when both are set.
+
+**Important architectural note specific to the Google path:** the bot caches Google's userinfo response per token for 5 minutes by default (`CacheTTL`), so on the Direct Google path Authenticate doesn't hit Google's userinfo endpoint on every request. The allowlist check, however, runs on **every** Authenticate against either the cached identity or a fresh one — never against a cached "yes, authorized" verdict. That's what makes the file-backed allowlists actually hot-reload: a user removed from the ConfigMap is denied on their next request, not after their cached userinfo lookup expires. Don't refactor this back to caching the authorized `*Result` — you'd silently break revocation latency.
+
+Example ConfigMap + mount:
+
+```yaml
+# clusters/<env>/diagnostic-bot/configmap-google-allowlist.yaml
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: diagnostic-bot-google-allowlist
+  namespace: diagnostic-bot
+data:
+  allowed-emails: |-
+    alice@katn-solutions.io
+    bob@katn-solutions.io
+    carol@katn-solutions.io
+```
+
+```yaml
+# clusters/<env>/diagnostic-bot/deployment.yaml — container env + mount
+env:
+  - name: GOOGLE_OAUTH_CLIENT_ID
+    value: <your-id>.apps.googleusercontent.com
+  - name: GOOGLE_ALLOWED_HOSTED_DOMAINS
+    value: katn-solutions.io
+  - name: GOOGLE_ALLOWED_EMAILS_FILE
+    value: /etc/diagnostic-bot/oauth/allowed-emails
+  - name: MCP_PUBLIC_URL
+    value: https://diagnostic-bot.example.com
+
+volumeMounts:
+  - name: google-allowlist
+    mountPath: /etc/diagnostic-bot/oauth
+    readOnly: true
+
+volumes:
+  - name: google-allowlist
+    configMap:
+      name: diagnostic-bot-google-allowlist
+```
+
+The bot logs the active source on startup so the operator never has to wonder:
+
+```
+Google OAuth enabled for MCP HTTP/SSE
+  client_id=<id>.apps.googleusercontent.com
+  emails_from_file=true emails_file=/etc/diagnostic-bot/oauth/allowed-emails
+  hosted_domains_from_file=false allowed_hosted_domains=[katn-solutions.io]
+  ...
 ```
 
 ### Each user's `.mcp.json` / `claude mcp add`

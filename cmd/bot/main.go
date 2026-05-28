@@ -283,9 +283,11 @@ func maybeWrapGoogleAuth(ctx context.Context, mcpHandler, sseHandler http.Handle
 	}
 
 	cfg := auth.GoogleConfig{
-		ClientID:             clientID,
-		AllowedHostedDomains: splitCSV(getEnv("GOOGLE_ALLOWED_HOSTED_DOMAINS", "")),
-		AllowedEmails:        splitCSV(getEnv("GOOGLE_ALLOWED_EMAILS", "")),
+		ClientID:                 clientID,
+		AllowedHostedDomains:     splitCSV(getEnv("GOOGLE_ALLOWED_HOSTED_DOMAINS", "")),
+		AllowedEmails:            splitCSV(getEnv("GOOGLE_ALLOWED_EMAILS", "")),
+		AllowedHostedDomainsFile: getEnv("GOOGLE_ALLOWED_HOSTED_DOMAINS_FILE", ""),
+		AllowedEmailsFile:        getEnv("GOOGLE_ALLOWED_EMAILS_FILE", ""),
 	}
 	googleAuth, err := auth.NewGoogleAuth(cfg, logger)
 	if err != nil {
@@ -301,6 +303,10 @@ func maybeWrapGoogleAuth(ctx context.Context, mcpHandler, sseHandler http.Handle
 		slog.String("client_id", clientID),
 		slog.Any("allowed_hosted_domains", cfg.AllowedHostedDomains),
 		slog.Int("allowed_emails_count", len(cfg.AllowedEmails)),
+		slog.Bool("hosted_domains_from_file", cfg.AllowedHostedDomainsFile != ""),
+		slog.Bool("emails_from_file", cfg.AllowedEmailsFile != ""),
+		slog.String("hosted_domains_file", cfg.AllowedHostedDomainsFile),
+		slog.String("emails_file", cfg.AllowedEmailsFile),
 		slog.String("resource_metadata_url", resourceMetaURL),
 	)
 	return mcp, sse
@@ -393,12 +399,15 @@ func buildOIDCHandlers(ctx context.Context, mcpHandler, sseHandler http.Handler,
 	}
 
 	cfg := &auth.OIDCConfig{
-		IssuerURL:            issuer,
-		Audience:             audience,
-		AllowedGroups:        splitCSV(getEnv("MCP_OIDC_ALLOWED_GROUPS", "")),
-		AllowedHostedDomains: splitCSV(getEnv("MCP_OIDC_ALLOWED_HOSTED_DOMAINS", "")),
-		AllowedEmails:        splitCSV(getEnv("MCP_OIDC_ALLOWED_EMAILS", "")),
-		JWKSCacheTime:        jwksCacheSeconds,
+		IssuerURL:                issuer,
+		Audience:                 audience,
+		AllowedGroups:            splitCSV(getEnv("MCP_OIDC_ALLOWED_GROUPS", "")),
+		AllowedHostedDomains:     splitCSV(getEnv("MCP_OIDC_ALLOWED_HOSTED_DOMAINS", "")),
+		AllowedEmails:            splitCSV(getEnv("MCP_OIDC_ALLOWED_EMAILS", "")),
+		AllowedGroupsFile:        getEnv("MCP_OIDC_ALLOWED_GROUPS_FILE", ""),
+		AllowedHostedDomainsFile: getEnv("MCP_OIDC_ALLOWED_HOSTED_DOMAINS_FILE", ""),
+		AllowedEmailsFile:        getEnv("MCP_OIDC_ALLOWED_EMAILS_FILE", ""),
+		JWKSCacheTime:            jwksCacheSeconds,
 	}
 	oidcAuth := auth.NewOIDCAuth(cfg, logger)
 
@@ -412,6 +421,12 @@ func buildOIDCHandlers(ctx context.Context, mcpHandler, sseHandler http.Handler,
 		slog.Any("allowed_groups", cfg.AllowedGroups),
 		slog.Any("allowed_hosted_domains", cfg.AllowedHostedDomains),
 		slog.Int("allowed_emails_count", len(cfg.AllowedEmails)),
+		slog.Bool("groups_from_file", cfg.AllowedGroupsFile != ""),
+		slog.Bool("hosted_domains_from_file", cfg.AllowedHostedDomainsFile != ""),
+		slog.Bool("emails_from_file", cfg.AllowedEmailsFile != ""),
+		slog.String("groups_file", cfg.AllowedGroupsFile),
+		slog.String("hosted_domains_file", cfg.AllowedHostedDomainsFile),
+		slog.String("emails_file", cfg.AllowedEmailsFile),
 		slog.Int("jwks_cache_seconds", cfg.JWKSCacheTime),
 		slog.String("resource_metadata_url", resourceMetaURL),
 	)

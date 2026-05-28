@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"path/filepath"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -311,4 +312,193 @@ func TestNewGoogleAuthRequiresClientID(t *testing.T) {
 	}, logger)
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "ClientID")
+}
+
+// TestGoogleAuthFileBackedEmailsHotReload is the load-bearing test for
+// file-backed allowlists on the Google path. Two contracts:
+//  1. ConfigMap edits propagate without a process restart: rewrite the
+//     file mid-session, the next Authenticate sees the new list.
+//  2. Hot-reload survives the userinfo cache. The cache holds the
+//     identity (subject/email/hd), not the authorized Result, so a user
+//     removed from the file is denied on their next request even while
+//     their token's cache entry is still warm. This is the bit that
+//     would silently break if someone "optimized" the cache back to
+//     holding *Result.
+func TestGoogleAuthFileBackedEmailsHotReload(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	emailsFile := filepath.Join(dir, "allowed-emails")
+	writeListFile(t, emailsFile, "alice@katn-solutions.io\nbob@katn-solutions.io\n")
+
+	// userinfo always says "this token belongs to alice." We'll change
+	// the allowlist underneath her — first she's in, then she's not.
+	server, hits := newGoogleUserInfoFake(t,
+		okStatus,
+		func(string) (body string) {
+			body = `{"sub":"sub-alice","email":"alice@katn-solutions.io","hd":"katn-solutions.io"}`
+			return body
+		})
+	t.Cleanup(server.Close)
+
+	logger := slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelError}))
+	auth, err := NewGoogleAuth(GoogleConfig{
+		ClientID:          "test-client.apps.googleusercontent.com",
+		AllowedEmailsFile: emailsFile,
+		UserInfoURL:       server.URL,
+	}, logger)
+	require.NoError(t, err)
+
+	// First call: alice is on the list, succeeds. userinfo hit.
+	_, err = auth.Authenticate(newReqWithBearer("alices-token"))
+	require.NoError(t, err)
+	require.Equal(t, int64(1), hits.Load())
+
+	// Rewrite the file to exclude alice. Bump mtime explicitly to
+	// dodge filesystem-clock granularity flakiness.
+	writeListFile(t, emailsFile, "bob@katn-solutions.io\n")
+	require.NoError(t, os.Chtimes(emailsFile, time.Time{}, time.Now().Add(time.Second)))
+
+	// Same token, identity is cached, but the allowlist check runs
+	// fresh and now denies. The contract: revocation effective on the
+	// next request, not after the userinfo cache TTL elapses.
+	_, err = auth.Authenticate(newReqWithBearer("alices-token"))
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "alice@katn-solutions.io")
+	require.Equal(t, int64(1), hits.Load(), "userinfo must NOT be re-hit — the cached identity should drive the rejection")
+}
+
+// TestGoogleAuthFileBackedHostedDomainsHotReload mirrors the email
+// test for the hosted-domain axis. Less common in practice (domains
+// rarely churn), but the contract needs to hold uniformly.
+func TestGoogleAuthFileBackedHostedDomainsHotReload(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	domainsFile := filepath.Join(dir, "allowed-hosted-domains")
+	writeListFile(t, domainsFile, "katn-solutions.io\n")
+
+	server, _ := newGoogleUserInfoFake(t,
+		okStatus,
+		func(string) (body string) {
+			body = `{"sub":"sub","email":"someone@partner.example","hd":"partner.example"}`
+			return body
+		})
+	t.Cleanup(server.Close)
+
+	logger := slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelError}))
+	auth, err := NewGoogleAuth(GoogleConfig{
+		ClientID:                 "test-client.apps.googleusercontent.com",
+		AllowedHostedDomainsFile: domainsFile,
+		UserInfoURL:              server.URL,
+	}, logger)
+	require.NoError(t, err)
+
+	// partner.example is NOT in the list → denied.
+	_, err = auth.Authenticate(newReqWithBearer("partner-token"))
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "partner.example")
+
+	// Add partner.example to the file. Next call should succeed.
+	writeListFile(t, domainsFile, "katn-solutions.io\npartner.example\n")
+	require.NoError(t, os.Chtimes(domainsFile, time.Time{}, time.Now().Add(time.Second)))
+
+	_, err = auth.Authenticate(newReqWithBearer("partner-token"))
+	require.NoError(t, err)
+}
+
+// TestGoogleAuthFileMissingFailsClosed: operator pointed at a file
+// that doesn't exist (typo / missing ConfigMap / broken mount). The
+// spec says fail closed on that axis — don't silently widen.
+func TestGoogleAuthFileMissingFailsClosed(t *testing.T) {
+	t.Parallel()
+	bogus := filepath.Join(t.TempDir(), "does-not-exist")
+
+	server, _ := newGoogleUserInfoFake(t,
+		okStatus,
+		func(string) (body string) {
+			body = `{"sub":"s","email":"alice@katn-solutions.io","hd":"katn-solutions.io"}`
+			return body
+		})
+	t.Cleanup(server.Close)
+
+	logger := slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelError}))
+	auth, err := NewGoogleAuth(GoogleConfig{
+		ClientID:          "test-client.apps.googleusercontent.com",
+		AllowedEmailsFile: bogus,
+		UserInfoURL:       server.URL,
+	}, logger)
+	require.NoError(t, err)
+
+	_, err = auth.Authenticate(newReqWithBearer("tok"))
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "allowed-emails file unreadable")
+}
+
+// TestGoogleAuthFileWinsOverStaticEnv: when both AllowedEmails (static)
+// and AllowedEmailsFile (path) are set, the file is the source of
+// truth — same precedence as the OIDC path, advertised in the startup
+// log.
+func TestGoogleAuthFileWinsOverStaticEnv(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	emailsFile := filepath.Join(dir, "allowed-emails")
+	writeListFile(t, emailsFile, "carol@katn-solutions.io\n")
+
+	server, _ := newGoogleUserInfoFake(t,
+		okStatus,
+		func(string) (body string) {
+			body = `{"sub":"s","email":"alice@katn-solutions.io","hd":"katn-solutions.io"}`
+			return body
+		})
+	t.Cleanup(server.Close)
+
+	logger := slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelError}))
+	auth, err := NewGoogleAuth(GoogleConfig{
+		ClientID:          "test-client.apps.googleusercontent.com",
+		AllowedEmails:     []string{"alice@katn-solutions.io"}, // ignored
+		AllowedEmailsFile: emailsFile,
+		UserInfoURL:       server.URL,
+	}, logger)
+	require.NoError(t, err)
+
+	// Alice is in the static slice (ignored) but NOT in the file → denied.
+	_, err = auth.Authenticate(newReqWithBearer("alices-token"))
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "alice@katn-solutions.io")
+}
+
+// TestGoogleAuthFileMtimeCacheStable: N Authenticate calls against an
+// unchanged file should yield N stats and exactly 1 read. The hot-
+// reload guarantee relies on the per-call stat (so an mtime change is
+// detected promptly); the cost-of-correctness budget relies on the
+// read happening only on change.
+func TestGoogleAuthFileMtimeCacheStable(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	emailsFile := filepath.Join(dir, "allowed-emails")
+	writeListFile(t, emailsFile, "alice@katn-solutions.io\n")
+
+	server, _ := newGoogleUserInfoFake(t,
+		okStatus,
+		func(string) (body string) {
+			body = `{"sub":"s","email":"alice@katn-solutions.io","hd":"katn-solutions.io"}`
+			return body
+		})
+	t.Cleanup(server.Close)
+
+	logger := slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelError}))
+	auth, err := NewGoogleAuth(GoogleConfig{
+		ClientID:          "test-client.apps.googleusercontent.com",
+		AllowedEmailsFile: emailsFile,
+		UserInfoURL:       server.URL,
+	}, logger)
+	require.NoError(t, err)
+
+	const calls = 5
+	for i := range calls {
+		_, authErr := auth.Authenticate(newReqWithBearer(fmt.Sprintf("token-%d", i)))
+		require.NoError(t, authErr)
+	}
+
+	require.Equal(t, int64(calls), auth.listStatCount.Load(), "stat should run on every call")
+	require.Equal(t, int64(1), auth.listReadCount.Load(), "read should happen only on the cold miss")
 }
