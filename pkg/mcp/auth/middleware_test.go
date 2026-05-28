@@ -66,7 +66,7 @@ func TestWithAuthReturns401AndWWWAuthenticateOnMissingToken(t *testing.T) {
 // validates, downstream runs.
 func TestWithAuthAllowsAuthenticatedRequest(t *testing.T) {
 	t.Parallel()
-	stub := &stubMethod{result: &Result{Authenticated: true, Email: "alice@katn.io", Method: "google-oauth"}}
+	stub := &stubMethod{result: &Result{Authenticated: true, Email: "alice@katn-solutions.io", Method: "google-oauth"}}
 	downstreamCalled := false
 	wrapped := WithAuth(stub, testResourceMetadataURL, newTestLogger())(http.HandlerFunc(func(_ http.ResponseWriter, _ *http.Request) {
 		downstreamCalled = true
@@ -84,7 +84,7 @@ func TestWithAuthAllowsAuthenticatedRequest(t *testing.T) {
 // up the verified email so Grafana version notes carry the real human.
 func TestWithAuthInjectsResultIntoContext(t *testing.T) {
 	t.Parallel()
-	want := &Result{Authenticated: true, Email: "alice@katn.io", Method: "google-oauth"}
+	want := &Result{Authenticated: true, Email: "alice@katn-solutions.io", Method: "google-oauth"}
 	stub := &stubMethod{result: want}
 	var seen *Result
 	wrapped := WithAuth(stub, testResourceMetadataURL, newTestLogger())(http.HandlerFunc(func(_ http.ResponseWriter, r *http.Request) {
@@ -95,7 +95,7 @@ func TestWithAuthInjectsResultIntoContext(t *testing.T) {
 	wrapped.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/mcp", nil))
 
 	require.NotNil(t, seen)
-	require.Equal(t, "alice@katn.io", seen.Email)
+	require.Equal(t, "alice@katn-solutions.io", seen.Email)
 	require.Equal(t, "google-oauth", seen.Method)
 }
 

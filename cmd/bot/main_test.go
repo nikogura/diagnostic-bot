@@ -210,6 +210,88 @@ func TestProtectedResourceMetadataAdvertisesGoogleWhenActive(t *testing.T) {
 // TestProtectedResourceMetadataOmittedWhenNoAuthActive verifies that with
 // no auth provider configured, the well-known endpoint isn't served —
 // pointing clients at nothing would be a worse experience than 404.
+// TestSplitCSVAcceptsCommasAndWhitespace is the regression guard for the
+// "make MCP_OIDC_ALLOWED_EMAILS bearable to maintain" change. A single
+// flat env var holding comma-separated emails is fine for two or three
+// entries; once you have a dozen, the YAML deployment file becomes
+// unreadable. The fix is to accept both commas AND whitespace (notably
+// newlines) as separators, so operators can write a multi-line YAML
+// block scalar and get one entry per line.
+func TestSplitCSVAcceptsCommasAndWhitespace(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name string
+		in   string
+		want []string
+	}{
+		{
+			name: "empty",
+			in:   "",
+			want: nil,
+		},
+		{
+			name: "only_whitespace",
+			in:   "   \n\t  ",
+			want: nil,
+		},
+		{
+			name: "single_value",
+			in:   "alice@katn-solutions.io",
+			want: []string{"alice@katn-solutions.io"},
+		},
+		{
+			name: "comma_separated_legacy",
+			in:   "alice@katn-solutions.io,bob@katn-solutions.io,carol@katn-solutions.io",
+			want: []string{"alice@katn-solutions.io", "bob@katn-solutions.io", "carol@katn-solutions.io"},
+		},
+		{
+			name: "comma_with_spaces",
+			in:   "alice@katn-solutions.io, bob@katn-solutions.io ,carol@katn-solutions.io",
+			want: []string{"alice@katn-solutions.io", "bob@katn-solutions.io", "carol@katn-solutions.io"},
+		},
+		{
+			name: "newline_separated_block_scalar",
+			// What a YAML `value: |-` block scalar produces when each
+			// entry is on its own line. The whole point of this change.
+			in:   "alice@katn-solutions.io\nbob@katn-solutions.io\ncarol@katn-solutions.io",
+			want: []string{"alice@katn-solutions.io", "bob@katn-solutions.io", "carol@katn-solutions.io"},
+		},
+		{
+			name: "mixed_commas_and_newlines",
+			in:   "alice@katn-solutions.io,bob@katn-solutions.io\ncarol@katn-solutions.io",
+			want: []string{"alice@katn-solutions.io", "bob@katn-solutions.io", "carol@katn-solutions.io"},
+		},
+		{
+			name: "indented_yaml_block_scalar",
+			// YAML block scalars strip common indentation but mismatched
+			// indents leave leading whitespace on some lines. The
+			// whitespace-as-separator rule means that's harmless.
+			in:   "alice@katn-solutions.io\n  bob@katn-solutions.io\n\tcarol@katn-solutions.io",
+			want: []string{"alice@katn-solutions.io", "bob@katn-solutions.io", "carol@katn-solutions.io"},
+		},
+		{
+			name: "consecutive_separators_dropped",
+			in:   "alice@katn-solutions.io,,,\n\n\nbob@katn-solutions.io",
+			want: []string{"alice@katn-solutions.io", "bob@katn-solutions.io"},
+		},
+		{
+			name: "trailing_newline_from_pipe_block",
+			// `value: |` (without the `-`) preserves the trailing newline.
+			in:   "alice@katn-solutions.io\nbob@katn-solutions.io\n",
+			want: []string{"alice@katn-solutions.io", "bob@katn-solutions.io"},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			got := splitCSV(tt.in)
+			require.Equal(t, tt.want, got)
+		})
+	}
+}
+
 func TestProtectedResourceMetadataOmittedWhenNoAuthActive(t *testing.T) {
 	t.Setenv("MCP_OIDC_ISSUER", "")
 	t.Setenv("GOOGLE_OAUTH_CLIENT_ID", "")

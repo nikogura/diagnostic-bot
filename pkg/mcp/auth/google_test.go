@@ -111,7 +111,7 @@ func TestGoogleAuthCallsUserInfoWithBearer(t *testing.T) {
 	var capturedAuthHeader string
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		capturedAuthHeader = r.Header.Get("Authorization")
-		_, _ = fmt.Fprint(w, `{"sub":"123","email":"alice@katn.io","email_verified":true,"hd":"katn.io"}`)
+		_, _ = fmt.Fprint(w, `{"sub":"123","email":"alice@katn-solutions.io","email_verified":true,"hd":"katn-solutions.io"}`)
 	}))
 	t.Cleanup(server.Close)
 	auth := newTestGoogleAuth(t, server, nil, nil)
@@ -128,7 +128,7 @@ func TestGoogleAuthReturnsIdentityOnSuccess(t *testing.T) {
 	server, _ := newGoogleUserInfoFake(t,
 		okStatus,
 		func(string) (body string) {
-			body = `{"sub":"google-123","email":"alice@katn.io","email_verified":true,"hd":"katn.io","name":"Alice"}`
+			body = `{"sub":"google-123","email":"alice@katn-solutions.io","email_verified":true,"hd":"katn-solutions.io","name":"Alice"}`
 			return body
 		})
 	t.Cleanup(server.Close)
@@ -138,7 +138,7 @@ func TestGoogleAuthReturnsIdentityOnSuccess(t *testing.T) {
 	require.NoError(t, err)
 	require.NotNil(t, result)
 	require.True(t, result.Authenticated)
-	require.Equal(t, "alice@katn.io", result.Email)
+	require.Equal(t, "alice@katn-solutions.io", result.Email)
 	require.Equal(t, "google-123", result.Subject)
 	require.Equal(t, "google-oauth", result.Method)
 }
@@ -170,7 +170,7 @@ func TestGoogleAuthRejectsWrongHostedDomain(t *testing.T) {
 			return body
 		})
 	t.Cleanup(server.Close)
-	auth := newTestGoogleAuth(t, server, []string{"katn.io"}, nil)
+	auth := newTestGoogleAuth(t, server, []string{"katn-solutions.io"}, nil)
 
 	_, err := auth.Authenticate(newReqWithBearer("tok"))
 	require.Error(t, err)
@@ -183,11 +183,11 @@ func TestGoogleAuthAcceptsMatchingHostedDomain(t *testing.T) {
 	server, _ := newGoogleUserInfoFake(t,
 		func(string) (status int) { status = http.StatusOK; return status },
 		func(string) (body string) {
-			body = `{"sub":"123","email":"alice@katn.io","hd":"katn.io"}`
+			body = `{"sub":"123","email":"alice@katn-solutions.io","hd":"katn-solutions.io"}`
 			return body
 		})
 	t.Cleanup(server.Close)
-	auth := newTestGoogleAuth(t, server, []string{"katn.io"}, nil)
+	auth := newTestGoogleAuth(t, server, []string{"katn-solutions.io"}, nil)
 
 	result, err := auth.Authenticate(newReqWithBearer("tok"))
 	require.NoError(t, err)
@@ -223,11 +223,11 @@ func TestGoogleAuthEnforcesEmailAllowlistWhenSet(t *testing.T) {
 	server, _ := newGoogleUserInfoFake(t,
 		okStatus,
 		func(string) (body string) {
-			body = `{"sub":"123","email":"bob@katn.io","hd":"katn.io"}`
+			body = `{"sub":"123","email":"bob@katn-solutions.io","hd":"katn-solutions.io"}`
 			return body
 		})
 	t.Cleanup(server.Close)
-	auth := newTestGoogleAuth(t, server, []string{"katn.io"}, []string{"alice@katn.io"})
+	auth := newTestGoogleAuth(t, server, []string{"katn-solutions.io"}, []string{"alice@katn-solutions.io"})
 
 	_, err := auth.Authenticate(newReqWithBearer("tok"))
 	require.Error(t, err)
@@ -242,7 +242,7 @@ func TestGoogleAuthCachesValidToken(t *testing.T) {
 	server, hits := newGoogleUserInfoFake(t,
 		func(string) (status int) { status = http.StatusOK; return status },
 		func(string) (body string) {
-			body = `{"sub":"123","email":"alice@katn.io","hd":"katn.io"}`
+			body = `{"sub":"123","email":"alice@katn-solutions.io","hd":"katn-solutions.io"}`
 			return body
 		})
 	t.Cleanup(server.Close)
@@ -266,7 +266,7 @@ func TestGoogleAuthCacheExpires(t *testing.T) {
 	server, hits := newGoogleUserInfoFake(t,
 		func(string) (status int) { status = http.StatusOK; return status },
 		func(string) (body string) {
-			body = `{"sub":"123","email":"alice@katn.io","hd":"katn.io"}`
+			body = `{"sub":"123","email":"alice@katn-solutions.io","hd":"katn-solutions.io"}`
 			return body
 		})
 	t.Cleanup(server.Close)

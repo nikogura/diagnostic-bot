@@ -138,14 +138,14 @@ func TestAuditUserFromContextPrefersAuthResultEmail(t *testing.T) {
 	require.Equal(t, "slack-user-bob", server.auditUserFromContext(botCtx))
 
 	// HTTP/SSE path: verified auth result beats both.
-	authCtx := context.WithValue(context.Background(), authResultCtxKeyForTest{}, &auth.Result{Authenticated: true, Email: "alice@katn.io", Method: "google-oauth"})
+	authCtx := context.WithValue(context.Background(), authResultCtxKeyForTest{}, &auth.Result{Authenticated: true, Email: "alice@katn-solutions.io", Method: "google-oauth"})
 	_ = authCtx // marker for the comment block; the next line uses the real context value via auth.WithAuth at runtime
-	verified := injectAuthResult(context.Background(), &auth.Result{Authenticated: true, Email: "alice@katn.io", Method: "google-oauth"})
-	require.Equal(t, "alice@katn.io", server.auditUserFromContext(verified))
+	verified := injectAuthResult(context.Background(), &auth.Result{Authenticated: true, Email: "alice@katn-solutions.io", Method: "google-oauth"})
+	require.Equal(t, "alice@katn-solutions.io", server.auditUserFromContext(verified))
 
 	// Verified identity also wins over WithAuditUser — trusted source > LLM-side hint.
-	mixed := injectAuthResult(WithAuditUser(context.Background(), "slack-user-bob"), &auth.Result{Authenticated: true, Email: "alice@katn.io"})
-	require.Equal(t, "alice@katn.io", server.auditUserFromContext(mixed))
+	mixed := injectAuthResult(WithAuditUser(context.Background(), "slack-user-bob"), &auth.Result{Authenticated: true, Email: "alice@katn-solutions.io"})
+	require.Equal(t, "alice@katn-solutions.io", server.auditUserFromContext(mixed))
 }
 
 // authResultCtxKeyForTest is a no-op alias to make the precedence-order

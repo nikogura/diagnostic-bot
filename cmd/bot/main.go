@@ -11,6 +11,7 @@ import (
 	"strings"
 	"syscall"
 	"time"
+	"unicode"
 
 	"github.com/nikogura/diagnostic-bot/pkg/bot"
 	"github.com/nikogura/diagnostic-bot/pkg/k8s"
@@ -449,16 +450,39 @@ func registerOAuthMetadataRoute(mux *http.ServeMux, logger *slog.Logger) {
 	)
 }
 
-// splitCSV trims whitespace and drops empty entries from a comma-separated env value.
+// splitCSV parses an env-var-style list, accepting commas, whitespace,
+// or any combination as separators. Empty entries are dropped.
+//
+// The original implementation only split on commas, which meant a long
+// allowlist like MCP_OIDC_ALLOWED_EMAILS had to live on a single long
+// line in the Deployment YAML — fine for two or three entries, awful at
+// a dozen. Accepting whitespace too lets operators write a multi-line
+// YAML block scalar with one entry per line:
+//
+//	env:
+//	  - name: MCP_OIDC_ALLOWED_EMAILS
+//	    value: |-
+//	      alice@katn-solutions.io
+//	      bob@katn-solutions.io
+//	      carol@katn-solutions.io
+//
+// Both forms produce identical output. Mixed forms (commas AND newlines)
+// also work, which matters because YAML block scalars sometimes leave
+// stray indentation.
 func splitCSV(v string) (out []string) {
-	if v == "" {
-		return out
-	}
-	for _, p := range strings.Split(v, ",") {
-		p = strings.TrimSpace(p)
-		if p != "" {
-			out = append(out, p)
-		}
+	out = strings.FieldsFunc(v, isCSVSeparator)
+	if len(out) == 0 {
+		out = nil
 	}
 	return out
+}
+
+// isCSVSeparator reports whether r should be treated as a boundary
+// between splitCSV entries: literal comma or any Unicode whitespace.
+// Extracted to a top-level function so the namedreturns linter doesn't
+// flag the predicate's unnamed bool return (per the project's
+// "Nested closures with returns" anti-pattern guidance).
+func isCSVSeparator(r rune) (isSep bool) {
+	isSep = r == ',' || unicode.IsSpace(r)
+	return isSep
 }

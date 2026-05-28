@@ -583,16 +583,16 @@ The bot is configured via environment variables:
 - `MCP_API_KEYS` - API key authentication in format `key1:user1,key2:user2`
 - `MCP_OIDC_ISSUER` - Enables generic OIDC/JWKS auth on the MCP HTTP/SSE endpoints (e.g. `https://dex.yourdomain.com`). When set, every request to `/mcp` and `/sse` must carry a signed RS256 JWT in `Authorization: Bearer …`; the bot validates the signature against the issuer's `/keys` JWKS endpoint, the `iss` claim against this URL, the `aud` claim against `MCP_OIDC_AUDIENCE`, and `exp`/`nbf`. Mutually exclusive with `GOOGLE_OAUTH_CLIENT_ID` — both-set is a startup error. **Recommended setup: [Dex + Google upstream](#dex--google-upstream-recommended).**
 - `MCP_OIDC_AUDIENCE` - Required when `MCP_OIDC_ISSUER` is set. The IdP client ID — binds tokens to this specific client. Refusing to run without it closes the audience-binding gap.
-- `MCP_OIDC_ALLOWED_HOSTED_DOMAINS` - Comma-separated allowlist of email domains (e.g. `katn-solutions.io`). The bot derives the domain from the `@`-suffix of the JWT's `email` claim — works whether or not the IdP passes through a separate `hd` claim. Empty = no domain restriction.
-- `MCP_OIDC_ALLOWED_EMAILS` - Comma-separated allowlist of exact email addresses. Useful for "these specific humans only," typically alongside the broader hosted-domain filter. Empty = no per-email restriction.
-- `MCP_OIDC_ALLOWED_GROUPS` - Comma-separated list of groups the user must be a member of (matched against the `groups` claim in the JWT). Empty means any authenticated user is allowed. Requires the IdP to emit the `groups` claim — for Google upstream, this requires Workspace Admin SDK access via domain-wide delegation; skip this knob if you don't have DWD configured.
+- `MCP_OIDC_ALLOWED_HOSTED_DOMAINS` - Allowlist of email domains (e.g. `katn-solutions.io`). The bot derives the domain from the `@`-suffix of the JWT's `email` claim — works whether or not the IdP passes through a separate `hd` claim. Empty = no domain restriction. Entries are separated by commas or any whitespace (newlines, tabs, spaces) — see the YAML `|-` block example in [Step 3](#step-3-bot-env-vars) for the readable multi-line form.
+- `MCP_OIDC_ALLOWED_EMAILS` - Allowlist of exact email addresses. Useful for "these specific humans only," typically alongside the broader hosted-domain filter. Empty = no per-email restriction. Same separator rules as `MCP_OIDC_ALLOWED_HOSTED_DOMAINS`.
+- `MCP_OIDC_ALLOWED_GROUPS` - Groups the user must be a member of (matched against the `groups` claim in the JWT). Empty means any authenticated user is allowed. Requires the IdP to emit the `groups` claim — for Google upstream, this requires Workspace Admin SDK access via domain-wide delegation; skip this knob if you don't have DWD configured. Same separator rules as `MCP_OIDC_ALLOWED_HOSTED_DOMAINS`.
 - `MCP_OIDC_JWKS_CACHE_SECONDS` - How long to cache the JWKS document. Default `300`.
 - `MCP_OIDC_SKIP_ISSUER_VERIFY` - Skip issuer verification (default: `false`, use only for testing).
 - `MCP_MTLS_CA_CERT_PATH` - Path to CA certificate for mutual TLS authentication
 - `MCP_MTLS_VERIFY_CLIENT` - Verify client certificates against CA (default: `true`)
 - `GOOGLE_OAUTH_CLIENT_ID` - Enables Google OAuth on the MCP HTTP/SSE endpoints. When set, every request to `/mcp` and `/sse` must carry a Google access token in `Authorization: Bearer …`; missing/invalid tokens get `401` with `WWW-Authenticate` pointing at `/.well-known/oauth-protected-resource`. Claude Code reads that, opens a browser to Google, and caches the token thereafter. The Slack-bot stdio path is unaffected — it never hits HTTP. When unset, the MCP HTTP/SSE endpoints stay unauthenticated (current VPC-gated behavior). See [Google OAuth setup](#google-oauth-setup).
-- `GOOGLE_ALLOWED_HOSTED_DOMAINS` - Comma-separated list of Google Workspace domains whose users may authenticate (e.g. `katn-solutions.io`). Empty means no domain restriction.
-- `GOOGLE_ALLOWED_EMAILS` - Optional explicit per-user email allowlist applied on top of the hosted-domain filter. Empty means no per-email restriction.
+- `GOOGLE_ALLOWED_HOSTED_DOMAINS` - Allowlist of Google Workspace domains whose users may authenticate (e.g. `katn-solutions.io`). Empty means no domain restriction. Entries are separated by commas or any whitespace (newlines, tabs, spaces).
+- `GOOGLE_ALLOWED_EMAILS` - Optional explicit per-user email allowlist applied on top of the hosted-domain filter. Empty means no per-email restriction. Same separator rules as `GOOGLE_ALLOWED_HOSTED_DOMAINS`.
 - `MCP_PUBLIC_URL` - The externally-reachable base URL of the MCP HTTP server (e.g. `https://diagnostic-bot.example.com`). Required when `GOOGLE_OAUTH_CLIENT_ID` is set — used to construct the `resource_metadata` URL Claude Code follows.
 
 **Tool Backing Services** (each enables a set of MCP tools — see [Tool Categories](#tool-categories)):
@@ -1123,6 +1123,27 @@ MCP_OIDC_ALLOWED_EMAILS=alice@katn-solutions.io,bob@katn-solutions.io   # narrow
 ```
 
 When `MCP_OIDC_ISSUER` is unset, the OIDC path is off. Both `MCP_OIDC_ISSUER` and `GOOGLE_OAUTH_CLIENT_ID` set simultaneously is a startup error — pick exactly one.
+
+#### Long allowlists: use a YAML block scalar
+
+The allowlist env vars accept **commas or any whitespace** (newlines, tabs, spaces) as entry separators. A single-line comma-separated value is fine for two or three entries; for anything longer, drop in a YAML `|-` block scalar so each entry is on its own line and the diff is reviewable:
+
+```yaml
+# kubernetes Deployment manifest, container env block
+env:
+  - name: MCP_OIDC_ALLOWED_HOSTED_DOMAINS
+    value: katn-solutions.io
+
+  - name: MCP_OIDC_ALLOWED_EMAILS
+    value: |-
+      alice@katn-solutions.io
+      bob@katn-solutions.io
+      carol@katn-solutions.io
+      dave@katn-solutions.io
+      eve@katn-solutions.io
+```
+
+Both forms parse identically — pick whichever reads better at the size you're at. Mixed forms (commas *and* newlines in the same value) also work, which is convenient when a block scalar leaves stray indentation. Empty entries are dropped.
 
 ### Step 4: How each user adds the server to Claude Code
 
