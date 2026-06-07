@@ -1,19 +1,40 @@
 # Diagnostic Bot
 
-A diagnostic automation platform that integrates Claude Code with Kubernetes, Loki, and observability tools. Provides autonomous investigation capabilities through YAML-based templates and custom MCP tools, delivering professional PDF reports. Includes a Slack bot for conversational access and an MCP server supporting both Streamable HTTP and SSE transports for use with Claude Code, Claude Desktop, OpenAI, Devin, and other MCP-compatible clients.
+A diagnostic automation platform that puts a constrained, safe investigation agent in front of Kubernetes, Loki, and your observability stack. It exists so anyone on the team can self-serve the same structured investigations — without needing to drive a general-purpose agent themselves, and without a path to break anything. One tool surface (an MCP server) is reachable two ways: a Slack bot that runs the agent for you, and the MCP server itself for power users who bring their own MCP client (Claude Code, Claude Desktop, OpenAI, Devin, and other MCP-compatible clients). Investigations are driven by YAML templates and deliver professional PDF reports.
 
 ## Features
 
-- **Claude Code Integration**: Uses Claude Code CLI with MCP server for advanced tool use capabilities
-- **MCP Server**: Custom tools for Loki queries, K8s access, GitHub integration, ECR scanning, and PDF generation
+- **Two doors, one brain**: a Slack bot (the bot runs the agent for you) and an MCP server (you run your own agent) share a single, gated tool surface — see [Architecture](#architecture)
+- **In-process agent**: the Slack path drives the model in-process over the same MCP tool handlers — no subprocess, no `--dangerously-skip-permissions`, no environment hand-off, no shell/filesystem escape
+- **Safe-by-construction toolset**: reads everywhere; the only write capability is Grafana dashboard management, and a `READ_ONLY` switch disables even that — see [Security](#security)
+- **Prompt-injection defenses**: untrusted tool output is defanged inbound (forged role/turn markers) and secret-scrubbed outbound, on every result
+- **MCP Server**: Custom tools for Loki, Prometheus, Grafana, CloudWatch, Tempo, databases, GitHub/GitLab, ECR, whois, and PDF generation
 - **Third-Party API Integration**: Configuration-driven system for adding read-only API integrations via YAML — no Go code required
 - **Investigation Skills**: YAML-based templates define structured investigation workflows
-- **Kubernetes Access**: Read-only access to pods, logs, ConfigMaps, Deployments, and Flux CRDs
 - **PDF Report Generation**: Automated professional reports with company branding via Pandoc + LaTeX
-- **Log Sanitization**: Comprehensive PII and secret redaction (13 regex patterns)
 - **Slack Socket Mode**: Supports app mentions, threads, and conversational follow-ups
-- **Conversation State**: In-memory tracking with 24-hour expiry and automatic file cleanup
-- **Prometheus Metrics**: Full observability with counters for investigations, API calls, K8s queries, and tool usage
+- **Full OpenTelemetry observability**: golden-signal metrics in Prometheus format, OTLP tracing, trace-correlated JSON logs, a checked-in Grafana dashboard, and Pod/ServiceMonitors — see [Observability](#observability)
+
+## Architecture
+
+The product is one tool surface (`pkg/mcp`) reachable through two front-ends, governed by one capability model:
+
+```
+                       ┌────────────────────────────────┐
+  Slack user  ───────► │ Slack bot                      │
+  ("@bot why is X..")  │   in-process agent loop        │ ──┐
+                       │   (pkg/bot + pkg/claude)       │   │
+                       └────────────────────────────────┘   │   ┌────────────────────┐
+                                                             ├──►│  pkg/mcp           │
+                       ┌────────────────────────────────┐   │   │  one gated toolset │
+  Power user  ───────► │ MCP server (HTTP/SSE or stdio) │ ──┘   │  reads + Grafana   │
+  (own MCP client)     │   authn: OIDC / Google / mTLS  │       └────────────────────┘
+                       └────────────────────────────────┘
+```
+
+- **Slack = the self-service door.** The user doesn't bring an agent; the bot *is* the agent. It runs the model in-process (`pkg/claude`) against the shared `pkg/mcp` tool handlers, wrapped in the investigation prompts. Because only those handlers are wired in, there is no shell, no filesystem, and no arbitrary-tool escape — the set of possible actions *is* the curated toolset.
+- **MCP server = the power-user door.** People who already drive their own MCP client point it at the authenticated MCP HTTP/SSE endpoint (or run the `mcp-server` binary over stdio). Same handlers, same capability limits.
+- **One brain.** A single `*mcp.Server` instance backs both doors, so the available tools — and the read-only switch — are identical everywhere.
 
 ## Code Quality
 
@@ -34,7 +55,7 @@ diagnostic-bot/
 │   ├── bot/                         # Slack bot logic
 │   │   ├── bot.go                   # Core bot initialization
 │   │   ├── handlers.go              # Event handlers
-│   │   ├── claudecode.go            # Claude Code CLI integration
+│   │   ├── agent.go                 # In-process agent loop (model + tool dispatch + filters)
 │   │   ├── tools.go                 # Dynamic tool availability config
 │   │   └── state.go                 # Conversation state management
 │   ├── claude/                      # Direct Claude API integration (legacy)
@@ -47,7 +68,8 @@ diagnostic-bot/
 │   ├── k8s/                         # Kubernetes and Loki clients
 │   │   ├── agent.go                 # K8s resource access
 │   │   ├── loki.go                  # Loki log query client
-│   │   └── sanitizer.go             # Log sanitization
+│   │   ├── sanitizer.go             # Outbound secret/PII scrubbing
+│   │   └── inbound_sanitizer.go     # Inbound forged-control-sequence defanging
 │   ├── apiconfig/                   # Third-party API integration framework
 │   │   ├── config.go                # YAML config schema and loader
 │   │   ├── client.go                # Generic HTTP client (auth, retry, rate limiting)
@@ -65,8 +87,9 @@ diagnostic-bot/
 │   │   ├── ecr.go                   # ECR vulnerability scanning
 │   │   └── auth/                    # MCP server authentication
 │   └── metrics/                     # Prometheus metrics
-│       ├── metrics.go               # Metric definitions
-│       └── server.go                # HTTP metrics server
+│       ├── metrics.go               # OTel instrument definitions + helpers
+│       └── server.go                # Admin HTTP server (/metrics + health)
+│   └── observability/               # OTel setup: metrics exporter, tracing, log correlation
 ├── apis/                            # Third-party API configs (YAML)
 │   └── bitgo.yaml                   # Example: BitGo read-only wallet API
 ├── investigations/                  # YAML investigation skills
@@ -575,6 +598,20 @@ The bot is configured via environment variables:
 - `FILE_RETENTION` - File cleanup interval (default: `24h`)
 - `MCP_HTTP_ENABLED` - Enable HTTP/SSE MCP server (default: `false`, set to `true` for production)
 - `MCP_HTTP_PORT` - Port for HTTP MCP server (default: `8090`)
+- `READ_ONLY` - Global read-only switch. When truthy (`1`/`true`/`yes`/`on`), every write tool (Grafana dashboard create/update/patch/delete/restore and folder creation) is withheld from the toolset and rejected at dispatch, on both the Slack and MCP doors. Default: `false` (Grafana dashboard writes allowed).
+- `METRICS_PORT` - Port for the admin/metrics + health server (default: `9090`). Always a separate port from the client-facing MCP HTTP listener; `/metrics` is never served on the MCP port.
+- `OTEL_EXPORTER_OTLP_ENDPOINT` - OTLP endpoint for distributed tracing (e.g. `http://tempo-distributor.monitoring.svc:4318`). Tracing is **no-op when unset** — the service behaves identically without a collector. `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT` takes precedence if both are set.
+
+List-valued variables accept commas **and** newlines, so a YAML block scalar stays readable — one entry per line:
+
+```yaml
+env:
+  - name: LOKI_ORG_IDS
+    value: |-
+      monitoring
+      cloudtrail
+      self-monitoring
+```
 
 **MCP Server Authentication** (multiple methods supported, configure one or more):
 - `MCP_AUTH_TOKEN` - Static bearer token for simple authentication (default: empty = no auth)
@@ -1421,22 +1458,42 @@ The OIDC validator hardcodes `<issuer>/keys` as the JWKS path — Dex's conventi
 
 ## Security
 
-- **Read-Only Access**: Bot has no write permissions to Kubernetes
-- **Log Sanitization**: All logs are sanitized before sending to Claude API
-  - API keys, tokens, passwords redacted
-  - JWT tokens redacted
-  - Email addresses redacted
-  - Credit card numbers redacted
-  - Private keys redacted
-- **Audit Trail**: All K8s queries and Claude API calls are logged
-- **GitOps Principles**: Never suggests direct cluster modifications
+The design goal is to let anyone run investigations safely. The agent is the guardrail: it can only do what its tools allow, and the tools are chosen so the worst case is recoverable.
+
+- **Safe-by-construction toolset.** Everything is read-only except Grafana dashboard management. There is no shell, no filesystem, and no arbitrary-tool access in the Slack agent — only the wired `pkg/mcp` handlers exist, so the universe of possible actions *is* the curated toolset. Kubernetes access is read-only (`get`/`list`); database queries are restricted to `SELECT`/`SHOW`/`DESCRIBE`/`EXPLAIN`.
+- **Grafana is the only write surface — deliberately.** Dashboard create/update/patch/delete/restore and folder creation are the sole mutations the agent can make. This is acceptable because Grafana keeps its own dashboard version history *and* is expected to be backed by a database with point-in-time recovery (e.g. CloudNativePG with WAL archiving to object storage). A bad or unwanted dashboard change is therefore reversible — an annoyance, not damage. No other resource the agent can reach is mutable.
+- **Global read-only switch.** Set `READ_ONLY=true` to disable *all* writes, including Grafana. In read-only mode the write tools are withheld from the advertised toolset (both doors) and rejected at dispatch as defense in depth — so even a forged or replayed call cannot mutate anything.
+- **Inbound defanging.** Tool output is untrusted data, never instructions. Forged conversational control sequences (`human(from …)` envelopes, `assistant:`/`system:` role markers, `<system-reminder>` tags, `[Request interrupted…]` markers) are neutralized before the model sees them, and each trip increments `injection_defangs_total` — a sustained signal there is an active probe, not noise.
+- **Outbound secret scrubbing.** Every tool result and the final answer pass a secret/PII scrubber (API keys, tokens, passwords, JWTs, private keys, connection strings, emails, card numbers) before leaving the process.
+- **Audit Trail.** All tool dispatches, K8s queries, and Claude API calls are logged as structured JSON, trace-correlated when a span is active.
+- **GitOps Principles.** Never suggests direct cluster modifications.
 
 ## Deployment
+
+The distribution ships in two forms, both with a Pod/ServiceMonitor:
+
+- **Kustomize example** — [`kubernetes/`](kubernetes/). Renders with:
+  ```bash
+  kustomize build kubernetes/
+  ```
+- **Helm chart** — [`charts/diagnostic-bot/`](charts/diagnostic-bot/), also published as an OCI artifact to `oci://ghcr.io/nikogura/charts` on release.
+  ```bash
+  helm install diagnostic-bot charts/diagnostic-bot \
+    --set existingSecret=diagnostic-bot-secrets \
+    --set config.LOKI_ENDPOINT=http://loki-gateway.monitoring.svc:80
+  # Disable all writes (including Grafana):
+  #   --set config.extraEnv.READ_ONLY=true
+  # Expose the MCP HTTP door for power users:
+  #   --set mcpHttp.enabled=true
+  ```
+
+Both render in CI via `make test` (`kustomize build`, `helm lint`, `helm template`).
 
 Deploy as a Kubernetes Deployment with:
 
 - Single replica (in-memory state)
 - Non-root container user (UID 1000)
+- Resource requests **and** limits set (so the dashboard's % -of-request and % -of-limit panels are meaningful)
 - ServiceAccount with minimal RBAC:
   - `get`, `list` on pods, pods/log, configmaps, services
   - `get`, `list` on deployments
@@ -1470,25 +1527,33 @@ rules:
 
 ## Observability
 
-The bot exposes Prometheus metrics on port `:9090` for scraping:
+Instrumentation is OpenTelemetry end to end: metrics are exported in Prometheus format (OTel SDK → Prometheus exporter → `promhttp`), traces over OTLP, and logs are trace-correlated. The metrics + health server listens on its own admin port (`METRICS_PORT`, default `:9090`), always separate from the client-facing MCP HTTP listener.
 
-### Metrics
+### Metrics (golden signals + domain)
 
-- `investigations_started_total{type}` - Total investigations initiated by template type
-- `investigations_resolved_total{type}` - Total investigations completed
-- `claude_api_calls_total{status}` - Claude API call counts (success/error)
-- `claude_api_tokens_total{type="input|output"}` - Token usage tracking
-- `k8s_queries_total{namespace,resource_type}` - Kubernetes query audit trail
-- `loki_queries_total{status}` - Loki query tracking
-- `tool_executions_total{tool_name,status}` - MCP tool usage statistics
-- `conversations_active` - Current number of active conversations (gauge)
+- `investigations_started_total{type}` - Traffic: investigations initiated by template type
+- `investigations_resolved_total{type}` - Investigations completed
+- `investigation_duration_seconds{type,status}` - Latency histogram (SLO-budget buckets, in seconds)
+- `investigations_in_flight` - Saturation gauge: investigations currently executing
+- `tool_executions_total{tool_name,status}` - Tool dispatch counts (errors by status)
+- `injection_defangs_total{category}` - Forged control sequences defanged from untrusted output (active-probe signal)
+- `claude_api_calls_total{status}` / `claude_api_tokens_total{token_type}` - Claude API calls and token usage
+- `k8s_queries_total{namespace,resource_type}` / `loki_queries_total{status}` - Backend query audit
+- `conversations_active` - Active Slack conversations (gauge)
+
+### Tracing
+
+OpenTelemetry spans cover the investigation path and each tool dispatch (`investigation`, `tool.<name>`), with W3C trace-context propagation. Export is via OTLP/HTTP, enabled by `OTEL_EXPORTER_OTLP_ENDPOINT`; **no-op when unset**.
 
 ### Logging
 
-Structured JSON logging via `log/slog` with:
-- Severity levels (Debug, Info, Warn, Error)
-- Context-aware logging (conversation IDs, user IDs)
-- Automatic correlation for investigations
+Structured JSON logs via `log/slog`, decorated with `trace_id`/`span_id` when a span is active so logs, metrics, and traces correlate in the backend.
+
+### Grafana dashboard
+
+A portable dashboard ships at [`dashboards/diagnostic-bot.json`](dashboards/diagnostic-bot.json) with `${prometheus}`/`${loki}`/`${tempo}` datasource template variables (no hardcoded UIDs — imports anywhere). It includes the golden-signal panels (traffic, errors, latency, saturation) and health gauges, a Loki **logs** panel, a Tempo **traces** panel, and Kubernetes resource panels: CPU and memory utilization as **% of limit** *and* **% of request**, plus CPU CFS throttling as **% of periods** (the leading indicator of CPU starvation).
+
+The JSON file is the deliverable; import it through whatever dashboard provisioning you already run (Grafana provisioning files, Terraform/grizzly, the HTTP API, or a sidecar ConfigMap). `make dashboard-check` validates it stays well-formed JSON.
 
 ## Container Images
 

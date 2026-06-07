@@ -258,7 +258,7 @@ func (l *LokiClient) Query(ctx context.Context, req QueryRequest) (result QueryR
 		var statusBody []byte
 
 		statusBody, _ = io.ReadAll(resp.Body)
-		metrics.LokiQueriesTotal.WithLabelValues("error").Inc()
+		metrics.RecordLokiQuery(ctx, "error")
 		err = fmt.Errorf("loki query failed with status %d: %s", resp.StatusCode, string(statusBody))
 
 		return result, err
@@ -325,7 +325,7 @@ func (l *LokiClient) Query(ctx context.Context, req QueryRequest) (result QueryR
 	duration := time.Since(start)
 
 	// Record successful query
-	metrics.LokiQueriesTotal.WithLabelValues("success").Inc()
+	metrics.RecordLokiQuery(ctx, "success")
 
 	l.logger.InfoContext(ctx, "Loki query completed",
 		slog.Int("entries", len(entries)),

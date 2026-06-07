@@ -1,0 +1,11 @@
+apiVersion: v2
+name: diagnostic-bot
+description: Slack and MCP diagnostic agent with OpenTelemetry observability
+type: application
+version: 0.2.0
+appVersion: "0.2.0"
+home: https://github.com/nikogura/diagnostic-bot
+sources:
+  - https://github.com/nikogura/diagnostic-bot
+maintainers:
+  - name: Nik Ogura

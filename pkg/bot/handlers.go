@@ -122,8 +122,8 @@ func (b *Bot) startInvestigation(ctx context.Context, channel string, threadTS s
 	conv := b.conversations.Create(threadTS, channel, userID, matchResult.InvestigationType)
 
 	// Record metrics
-	metrics.InvestigationsStartedTotal.WithLabelValues(string(matchResult.InvestigationType)).Inc()
-	metrics.ConversationsActive.Set(float64(b.conversations.Count()))
+	metrics.RecordInvestigationStarted(ctx, string(matchResult.InvestigationType))
+	metrics.SetConversationsActive(int64(b.conversations.Count()))
 
 	b.logger.InfoContext(ctx, "starting investigation",
 		slog.String("type", string(matchResult.InvestigationType)),
@@ -148,7 +148,7 @@ func (b *Bot) startInvestigation(ctx context.Context, channel string, threadTS s
 	conv.OriginalUserMessage = message
 
 	// Run investigation via Claude Code
-	investigationResult, err := b.claudeCodeRunner.RunInvestigation(ctx, matchResult.Skill, message)
+	investigationResult, err := b.runner.RunInvestigation(ctx, matchResult.Skill, message)
 	if err != nil {
 		b.sendErrorMessage(channel, threadTS, fmt.Sprintf("Error starting investigation: %v", err))
 		return
@@ -185,7 +185,7 @@ func (b *Bot) startInvestigation(ctx context.Context, channel string, threadTS s
 	}
 
 	// Record completion
-	metrics.InvestigationsResolvedTotal.WithLabelValues(string(conv.InvestigationType)).Inc()
+	metrics.RecordInvestigationResolved(ctx, string(conv.InvestigationType))
 }
 
 // handleThreadReply handles a reply in an existing investigation thread.
@@ -244,7 +244,7 @@ func (b *Bot) handleThreadReply(ctx context.Context, channel string, threadTS st
 	}
 
 	// Run follow-up investigation via Claude Code
-	investigationResult, err := b.claudeCodeRunner.RunInvestigation(ctx, skill, followUpMessage)
+	investigationResult, err := b.runner.RunInvestigation(ctx, skill, followUpMessage)
 	if err != nil {
 		b.sendErrorMessage(channel, threadTS, fmt.Sprintf("Error processing follow-up: %v", err))
 		return

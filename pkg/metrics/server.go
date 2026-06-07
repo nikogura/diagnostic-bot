@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"time"
 
+	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 )
 
@@ -21,14 +22,21 @@ type HealthChecker interface {
 type Server struct {
 	Address       string
 	Logger        *slog.Logger
+	gatherer      prometheus.Gatherer
 	healthChecker HealthChecker
 }
 
-// NewServer creates a new metrics server.
-func NewServer(address string, logger *slog.Logger) (result *Server) {
+// NewServer creates a new metrics server. The gatherer is the registry the OTel
+// Prometheus exporter writes to; pass nil to fall back to the default registry.
+func NewServer(address string, gatherer prometheus.Gatherer, logger *slog.Logger) (result *Server) {
+	if gatherer == nil {
+		gatherer = prometheus.DefaultGatherer
+	}
+
 	result = &Server{
-		Address: address,
-		Logger:  logger,
+		Address:  address,
+		Logger:   logger,
+		gatherer: gatherer,
 	}
 
 	return result
@@ -46,7 +54,7 @@ func (s *Server) Start(ctx context.Context) (err error) {
 	mux.HandleFunc("/healthz", s.LivenessHandler)
 	mux.HandleFunc("/readyz", s.ReadinessHandler)
 	mux.HandleFunc("/health", s.DetailedHealthHandler)
-	mux.Handle("/metrics", promhttp.Handler())
+	mux.Handle("/metrics", promhttp.HandlerFor(s.gatherer, promhttp.HandlerOpts{}))
 
 	server := &http.Server{
 		Addr:    s.Address,

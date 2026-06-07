@@ -10,6 +10,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/nikogura/diagnostic-bot/pkg/claude"
 	"github.com/nikogura/diagnostic-bot/pkg/investigations"
 	"github.com/slack-go/slack"
 	"github.com/slack-go/slack/slackevents"
@@ -29,16 +30,16 @@ const (
 
 // Bot represents the Slack diagnostic bot.
 type Bot struct {
-	slackClient      *slack.Client
-	socketClient     *socketmode.Client
-	claudeCodeRunner *ClaudeCodeRunner
-	skillLibrary     *investigations.SkillLibrary
-	matcher          *investigations.Matcher
-	conversations    *ConversationStore
-	tracker          *InvestigationTracker
-	logger           *slog.Logger
-	botUserID        string
-	fileRetention    time.Duration
+	slackClient   *slack.Client
+	socketClient  *socketmode.Client
+	runner        *InvestigationRunner
+	skillLibrary  *investigations.SkillLibrary
+	matcher       *investigations.Matcher
+	conversations *ConversationStore
+	tracker       *InvestigationTracker
+	logger        *slog.Logger
+	botUserID     string
+	fileRetention time.Duration
 
 	// Health tracking
 	healthMu        sync.RWMutex
@@ -57,8 +58,10 @@ type Config struct {
 	ClaudeModel      string        // Claude model to use (e.g., "claude-sonnet-4-5-20250929")
 }
 
-// NewBot creates a new diagnostic bot.
-func NewBot(cfg Config, logger *slog.Logger) (result *Bot, err error) {
+// NewBot creates a new diagnostic bot. The toolServer is the single in-process
+// MCP tool surface, shared with the HTTP MCP server so every front-end drives
+// one identical, gated toolset.
+func NewBot(cfg Config, toolServer ToolDispatcher, logger *slog.Logger) (result *Bot, err error) {
 	var skillLibrary *investigations.SkillLibrary
 	var authResp *slack.AuthTestResponse
 
@@ -85,8 +88,11 @@ func NewBot(cfg Config, logger *slog.Logger) (result *Bot, err error) {
 		socketmode.OptionLog(slog.NewLogLogger(logger.Handler(), slog.LevelDebug)),
 	)
 
-	// Create Claude Code runner
-	claudeCodeRunner := NewClaudeCodeRunner(cfg.ClaudeModel, logger)
+	// Create the in-process investigation runner: an agent loop driving the
+	// shared MCP tool surface directly via the Anthropic API. No subprocess,
+	// no --dangerously-skip-permissions, no environment hand-off.
+	model := claude.NewClient(cfg.AnthropicAPIKey, cfg.ClaudeModel, logger)
+	runner := NewInvestigationRunner(model, toolServer, logger)
 
 	// Get bot user ID
 	authResp, err = slackClient.AuthTest()
@@ -102,16 +108,16 @@ func NewBot(cfg Config, logger *slog.Logger) (result *Bot, err error) {
 	}
 
 	result = &Bot{
-		slackClient:      slackClient,
-		socketClient:     socketClient,
-		claudeCodeRunner: claudeCodeRunner,
-		skillLibrary:     skillLibrary,
-		matcher:          matcher,
-		conversations:    NewConversationStore(ConversationExpiry),
-		tracker:          NewInvestigationTracker(),
-		logger:           logger,
-		botUserID:        authResp.UserID,
-		fileRetention:    fileRetention,
+		slackClient:   slackClient,
+		socketClient:  socketClient,
+		runner:        runner,
+		skillLibrary:  skillLibrary,
+		matcher:       matcher,
+		conversations: NewConversationStore(ConversationExpiry),
+		tracker:       NewInvestigationTracker(),
+		logger:        logger,
+		botUserID:     authResp.UserID,
+		fileRetention: fileRetention,
 	}
 
 	return result, err

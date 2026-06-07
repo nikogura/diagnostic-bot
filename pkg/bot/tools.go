@@ -5,6 +5,7 @@ import (
 	"strings"
 
 	"github.com/nikogura/diagnostic-bot/pkg/apiconfig"
+	"github.com/nikogura/diagnostic-bot/pkg/mcp"
 )
 
 // ToolConfig captures which tool categories are available based on environment configuration.
@@ -17,6 +18,7 @@ type ToolConfig struct {
 	GitHubAvailable     bool
 	DatabaseAvailable   bool
 	ECRAvailable        bool
+	ReadOnly            bool
 	APIToolRegistry     *apiconfig.APIToolRegistry
 }
 
@@ -31,6 +33,7 @@ func NewToolConfig() (config ToolConfig) {
 		GitHubAvailable:     os.Getenv("GITHUB_TOKEN") != "",
 		DatabaseAvailable:   hasDatabaseConfig(),
 		ECRAvailable:        os.Getenv("AWS_REGION") != "" || os.Getenv("AWS_DEFAULT_REGION") != "",
+		ReadOnly:            mcp.ReadOnlyEnabled(),
 	}
 
 	return config
@@ -54,7 +57,7 @@ func (tc ToolConfig) WriteToolUsage(builder *strings.Builder) {
 	}
 
 	if tc.GrafanaAvailable {
-		writeGrafanaToolUsage(builder)
+		writeGrafanaToolUsage(builder, tc.ReadOnly)
 	}
 
 	if tc.DatabaseAvailable {
@@ -151,14 +154,22 @@ func writePrometheusToolUsage(builder *strings.Builder) {
 	builder.WriteString("- `prometheus_list_endpoints`: List configured Prometheus endpoints\n\n")
 }
 
-func writeGrafanaToolUsage(builder *strings.Builder) {
+func writeGrafanaToolUsage(builder *strings.Builder, readOnly bool) {
 	builder.WriteString("**Grafana:**\n")
 	builder.WriteString("- `grafana_list_dashboards`: List all Grafana dashboards\n")
 	builder.WriteString("- `grafana_get_dashboard`: Get a specific Grafana dashboard by UID\n")
+	builder.WriteString("- `grafana_get_dashboard_version`: List a dashboard's version history (omit `version`) or fetch a specific saved version with full payload (supply `version`)\n")
+
+	// Write tools are advertised only when writes are permitted; in read-only
+	// mode they are neither described nor available.
+	if readOnly {
+		builder.WriteString("\n(Read-only mode: Grafana dashboards can be inspected but not created, modified, or deleted.)\n\n")
+		return
+	}
+
 	builder.WriteString("- `grafana_create_dashboard`: Create a new Grafana dashboard (supports postgres, mysql, prometheus, cloudwatch, and infinity datasources)\n")
 	builder.WriteString("- `grafana_update_dashboard`: Update an existing Grafana dashboard (replaces the full model)\n")
 	builder.WriteString("- `grafana_patch_dashboard`: Patch a Grafana dashboard server-side (RFC 7386 merge-patch or RFC 6902 JSON Patch); avoids round-tripping the full model for small edits\n")
-	builder.WriteString("- `grafana_get_dashboard_version`: List a dashboard's version history (omit `version`) or fetch a specific saved version with full payload (supply `version`)\n")
 	builder.WriteString("- `grafana_restore_dashboard_version`: Restore a dashboard to a previous version\n")
 	builder.WriteString("- `grafana_delete_dashboard`: Delete a Grafana dashboard\n")
 	builder.WriteString("- `grafana_create_folder`: Create a Grafana folder (directory) for grouping dashboards. Accepts title (required), uid (optional), parentUid (optional, for nested folders).\n\n")
@@ -186,11 +197,4 @@ func writeUtilityToolUsage(builder *strings.Builder) {
 	builder.WriteString("**Utilities:**\n")
 	builder.WriteString("- `whois_lookup`: Look up IP address geolocation, ISP, ASN\n")
 	builder.WriteString("- `generate_pdf`: Generate a PDF report from Markdown content\n\n")
-}
-
-// buildClaudeEnv constructs the environment variable list for the Claude Code subprocess.
-// It inherits the full parent environment so the MCP server can initialize all configured clients.
-func buildClaudeEnv() (env []string) {
-	env = os.Environ()
-	return env
 }

@@ -72,6 +72,7 @@ type Server struct {
 	logger                  *slog.Logger
 	companyName             string
 	auditUser               string
+	readOnly                bool
 }
 
 // NewServer creates a new MCP server.
@@ -168,9 +169,43 @@ func NewServer(lokiClient *k8s.LokiClient, githubToken string, apiToolRegistry *
 		logger:                  logger,
 		companyName:             companyName,
 		auditUser:               resolveAuditUser(logger),
+		readOnly:                ReadOnlyEnabled(),
+	}
+
+	if result.readOnly {
+		logger.Info("READ_ONLY mode enabled - all write tools (Grafana dashboard mutations) are disabled")
 	}
 
 	return result
+}
+
+// ReadOnlyEnabled reports whether the global read-only switch (the READ_ONLY
+// env var) is set. When on, every write capability (Grafana dashboard
+// create/update/patch/delete/restore and folder creation) is withheld from the
+// toolset and rejected at dispatch, across both the Slack and MCP front-ends.
+func ReadOnlyEnabled() (enabled bool) {
+	switch strings.ToLower(strings.TrimSpace(os.Getenv("READ_ONLY"))) {
+	case "1", "true", "yes", "on":
+		enabled = true
+	}
+
+	return enabled
+}
+
+// isWriteTool reports whether a tool name mutates state. Grafana dashboard
+// management is the only write surface in the toolset.
+func isWriteTool(name string) (isWrite bool) {
+	switch name {
+	case toolGrafanaCreateDashboard,
+		toolGrafanaUpdateDashboard,
+		toolGrafanaPatchDashboard,
+		toolGrafanaDeleteDashboard,
+		toolGrafanaCreateFolder,
+		toolGrafanaRestoreDashboardVersion:
+		isWrite = true
+	}
+
+	return isWrite
 }
 
 // Run starts the MCP server using stdio transport.
@@ -900,7 +935,13 @@ func (s *Server) getToolDefinitions() (result []MCPTool) {
 	}
 
 	if s.grafanaClient != nil {
-		result = append(result, getGrafanaTools()...)
+		result = append(result, getGrafanaReadTools()...)
+
+		// Grafana dashboard mutation is the only write capability in the
+		// toolset, and it is withheld entirely in read-only mode.
+		if !s.readOnly {
+			result = append(result, getGrafanaWriteTools()...)
+		}
 	}
 
 	if isCloudWatchConfigured() {
@@ -927,6 +968,15 @@ func (s *Server) getToolDefinitions() (result []MCPTool) {
 	}
 
 	return result
+}
+
+// ToolDefinitions returns the gated list of tools the server advertises,
+// for in-process callers (the Slack agent loop) that drive the same tool
+// surface as the MCP transports. The set is gated by which backends are
+// configured, identical to what the MCP transports expose.
+func (s *Server) ToolDefinitions() (tools []MCPTool) {
+	tools = s.getToolDefinitions()
+	return tools
 }
 
 // handleListTools returns the list of available tools.
@@ -970,6 +1020,13 @@ func (s *Server) handleToolCall(ctx context.Context, req MCPRequest) {
 
 // dispatchToolCall routes a tool call to the appropriate handler.
 func (s *Server) dispatchToolCall(ctx context.Context, toolName string, args map[string]interface{}) (result string, err error) {
+	// Defense in depth: even though read-only mode withholds write tools from
+	// the advertised list, reject any write call that still arrives.
+	if s.readOnly && isWriteTool(toolName) {
+		err = fmt.Errorf("tool %q is disabled: server is in read-only mode", toolName)
+		return result, err
+	}
+
 	switch toolName {
 	case toolQueryLoki:
 		result, err = s.executeQueryLoki(ctx, args)
@@ -1011,6 +1068,15 @@ func (s *Server) dispatchToolCall(ctx context.Context, toolName string, args map
 		result, err = s.dispatchExtendedToolCall(ctx, toolName, args)
 	}
 
+	return result, err
+}
+
+// DispatchTool executes a tool by name in-process and returns its textual
+// result. It is the exact dispatch path used by the MCP stdio and HTTP
+// transports, exposed for in-process callers (the Slack agent loop) so that
+// every front-end drives one identical, gated tool surface.
+func (s *Server) DispatchTool(ctx context.Context, name string, args map[string]interface{}) (result string, err error) {
+	result, err = s.dispatchToolCall(ctx, name, args)
 	return result, err
 }
 

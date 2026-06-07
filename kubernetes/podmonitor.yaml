@@ -1,0 +1,14 @@
+apiVersion: monitoring.coreos.com/v1
+kind: PodMonitor
+metadata:
+  name: diagnostic-bot
+  labels:
+    app.kubernetes.io/name: diagnostic-bot
+spec:
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: diagnostic-bot
+  podMetricsEndpoints:
+    - port: metrics
+      path: /metrics
+      interval: 30s

@@ -1,0 +1,15 @@
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: diagnostic-bot
+  labels:
+    app.kubernetes.io/name: diagnostic-bot
+spec:
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: diagnostic-bot
+  endpoints:
+    - port: metrics
+      path: /metrics
+      interval: 30s
+      scrapeTimeout: 10s

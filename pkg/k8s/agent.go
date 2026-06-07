@@ -112,7 +112,7 @@ func (a *Agent) FetchLogs(ctx context.Context, req LogRequest) (result string, e
 		slog.Duration("since", req.Since))
 
 	// Record metrics
-	metrics.K8sQueriesTotal.WithLabelValues(req.Namespace, "pod_logs").Inc()
+	metrics.RecordK8sQuery(ctx, req.Namespace, "pod_logs")
 
 	var pods []corev1.Pod
 
@@ -221,7 +221,7 @@ func (a *Agent) GetResource(ctx context.Context, resourceType string, namespace 
 		slog.String("format", outputFormat))
 
 	// Record metrics
-	metrics.K8sQueriesTotal.WithLabelValues(namespace, resourceType).Inc()
+	metrics.RecordK8sQuery(ctx, namespace, resourceType)
 
 	var resource interface{}
 

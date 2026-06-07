@@ -13,18 +13,32 @@ import (
 	"time"
 	"unicode"
 
+	"go.opentelemetry.io/otel"
+
 	"github.com/nikogura/diagnostic-bot/pkg/bot"
 	"github.com/nikogura/diagnostic-bot/pkg/k8s"
 	"github.com/nikogura/diagnostic-bot/pkg/mcp"
 	"github.com/nikogura/diagnostic-bot/pkg/mcp/auth"
 	"github.com/nikogura/diagnostic-bot/pkg/metrics"
+	"github.com/nikogura/diagnostic-bot/pkg/observability"
+)
+
+// serviceName and serviceVersion identify this service in telemetry.
+const (
+	serviceName    = "diagnostic-bot"
+	serviceVersion = "0.2.0"
+
+	// otelScope is the instrumentation scope for this service's instruments.
+	otelScope = "github.com/nikogura/diagnostic-bot"
 )
 
 func main() {
-	// Initialize structured logger
-	logger := slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{
+	// Structured JSON logs, decorated with trace/span IDs when a span is active
+	// so logs correlate with traces and metrics.
+	baseHandler := slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{
 		Level: slog.LevelInfo,
-	}))
+	})
+	logger := slog.New(observability.NewSlogHandler(baseHandler))
 
 	slog.SetDefault(logger)
 
@@ -62,8 +76,23 @@ func main() {
 	sigChan := make(chan os.Signal, 1)
 	signal.Notify(sigChan, syscall.SIGINT, syscall.SIGTERM)
 
-	// Start metrics server unconditionally — needed for liveness probes
-	metricsServer := metrics.NewServer(":9090", logger)
+	// Initialize observability (metrics exporter, tracing, propagation, and the
+	// metric instruments) before anything records telemetry. Tracing is no-op
+	// unless an OTLP endpoint is set.
+	obs := initObservability(ctx, logger)
+
+	defer func() {
+		shutdownErr := obs.Shutdown(context.Background())
+		if shutdownErr != nil {
+			logger.Error("observability shutdown error", slog.String("error", shutdownErr.Error()))
+		}
+	}()
+
+	// Start metrics server unconditionally — needed for liveness probes. It runs
+	// on its own admin port, always separate from the externally-facing MCP HTTP
+	// listener; /metrics is never exposed on the client-facing port.
+	metricsAddr := ":" + getEnv("METRICS_PORT", "9090")
+	metricsServer := metrics.NewServer(metricsAddr, obs.Registry, logger)
 
 	go func() {
 		metricsErr := metricsServer.Start(ctx)
@@ -72,11 +101,17 @@ func main() {
 		}
 	}()
 
+	// Build the single in-process MCP tool surface. This one *mcp.Server is
+	// shared by both front-ends: the HTTP MCP server (power users with their
+	// own claude-code) and the Slack agent loop (everyone else). One brain,
+	// two doors, one gated toolset.
+	toolServer := buildToolServer(ctx, cfg.GitHubToken, logger)
+
 	// Start MCP HTTP server unconditionally if enabled — independent of Slack
-	startMCPHTTPServer(ctx, cfg.GitHubToken, logger)
+	startMCPHTTPServer(ctx, toolServer, logger)
 
 	// Create bot — Slack is optional, MCP and metrics are not
-	diagnosticBot, err := bot.NewBot(cfg, logger)
+	diagnosticBot, err := bot.NewBot(cfg, toolServer, logger)
 	if err != nil {
 		logger.Warn("failed to create bot, MCP and metrics servers still running",
 			slog.String("error", err.Error()))
@@ -113,6 +148,27 @@ func main() {
 	}
 
 	logger.Info("bot shutdown complete")
+}
+
+// initObservability sets up metrics, tracing, and the metric instruments,
+// exiting the process on failure (telemetry is part of the contract, not
+// best-effort). Returns the providers handle for shutdown.
+func initObservability(ctx context.Context, logger *slog.Logger) (obs *observability.Providers) {
+	var err error
+
+	obs, err = observability.Init(ctx, serviceName, serviceVersion, logger)
+	if err != nil {
+		logger.ErrorContext(ctx, "failed to initialize observability", slog.String("error", err.Error()))
+		os.Exit(1)
+	}
+
+	err = metrics.Init(otel.Meter(otelScope))
+	if err != nil {
+		logger.ErrorContext(ctx, "failed to initialize metrics", slog.String("error", err.Error()))
+		os.Exit(1)
+	}
+
+	return obs
 }
 
 // getEnv retrieves an environment variable with a default value.
@@ -195,16 +251,11 @@ func parseFileRetention(logger *slog.Logger) (result time.Duration) {
 	return result
 }
 
-// startMCPHTTPServer starts the MCP HTTP server if MCP_HTTP_ENABLED is true.
-func startMCPHTTPServer(ctx context.Context, githubToken string, logger *slog.Logger) {
-	mcpHTTPEnabled := getEnv("MCP_HTTP_ENABLED", "false")
-	if mcpHTTPEnabled != "true" {
-		return
-	}
-
-	mcpHTTPPort := getEnv("MCP_HTTP_PORT", "8090")
-	mcpHTTPAddr := ":" + mcpHTTPPort
-
+// buildToolServer constructs the single in-process MCP tool surface from
+// environment configuration. Loki is best-effort (a missing endpoint warns
+// rather than fails) so the bot still serves the rest of its toolset; the
+// server self-gates each tool group by which backend is configured.
+func buildToolServer(ctx context.Context, githubToken string, logger *slog.Logger) (server *mcp.Server) {
 	lokiEndpoint := getEnv("LOKI_ENDPOINT", "")
 	if lokiEndpoint == "" {
 		logger.WarnContext(ctx, "LOKI_ENDPOINT not set - MCP Loki tools will be unavailable")
@@ -213,8 +264,24 @@ func startMCPHTTPServer(ctx context.Context, githubToken string, logger *slog.Lo
 
 	lokiClient := k8s.NewLokiClient(lokiEndpoint, logger)
 	configureLokiTenants(ctx, lokiClient, logger)
-	legacyServer := mcp.NewServer(lokiClient, githubToken, nil, logger)
-	sdkServer := mcp.NewSDKServer(legacyServer)
+
+	server = mcp.NewServer(lokiClient, githubToken, nil, logger)
+
+	return server
+}
+
+// startMCPHTTPServer starts the MCP HTTP server if MCP_HTTP_ENABLED is true,
+// serving the shared tool surface to power users running their own MCP client.
+func startMCPHTTPServer(ctx context.Context, toolServer *mcp.Server, logger *slog.Logger) {
+	mcpHTTPEnabled := getEnv("MCP_HTTP_ENABLED", "false")
+	if mcpHTTPEnabled != "true" {
+		return
+	}
+
+	mcpHTTPPort := getEnv("MCP_HTTP_PORT", "8090")
+	mcpHTTPAddr := ":" + mcpHTTPPort
+
+	sdkServer := mcp.NewSDKServer(toolServer)
 
 	mcpHandler := mcp.WithAuditSourceMiddleware(sdkServer.StreamableHTTPHandler())
 	sseHandler := mcp.WithAuditSourceMiddleware(sdkServer.SSEHandler())

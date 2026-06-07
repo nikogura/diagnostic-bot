@@ -91,7 +91,7 @@ func (c *APIClient) Execute(ctx context.Context, endpointName string, args map[s
 		status = "error"
 	}
 
-	metrics.ToolExecutionsTotal.WithLabelValues(c.config.Name+"_"+endpointName, status).Inc()
+	metrics.RecordToolExecution(ctx, c.config.Name+"_"+endpointName, status)
 
 	c.logger.InfoContext(ctx, "API request completed",
 		slog.String("api", c.config.Name),

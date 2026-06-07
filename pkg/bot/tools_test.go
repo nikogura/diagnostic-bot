@@ -5,7 +5,6 @@ import (
 	"testing"
 
 	"github.com/stretchr/testify/assert"
-	"github.com/stretchr/testify/require"
 )
 
 // clearToolEnvVars clears all env vars that affect ToolConfig.
@@ -273,12 +272,4 @@ func TestWriteToolUsageGrafanaMentionsInfinity(t *testing.T) {
 
 	assert.Contains(t, output, "grafana_create_dashboard", "Should include grafana_create_dashboard")
 	assert.Contains(t, output, "infinity", "Grafana create dashboard description should mention infinity")
-}
-
-func TestBuildClaudeEnv(t *testing.T) {
-	t.Parallel()
-
-	env := buildClaudeEnv()
-
-	require.NotEmpty(t, env, "buildClaudeEnv should return non-empty env")
 }

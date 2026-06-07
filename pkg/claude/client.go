@@ -92,15 +92,15 @@ func (c *Client) SendMessage(ctx context.Context, req MessageRequest) (result Me
 
 	resp, err = c.client.CreateMessages(ctx, request)
 	if err != nil {
-		metrics.ClaudeAPICallsTotal.WithLabelValues("error").Inc()
+		metrics.RecordClaudeAPICall(ctx, "error")
 		err = fmt.Errorf("calling Claude API: %w", err)
 		return result, err
 	}
 
 	// Record successful API call and token usage
-	metrics.ClaudeAPICallsTotal.WithLabelValues("success").Inc()
-	metrics.ClaudeAPITokensTotal.WithLabelValues("input").Add(float64(resp.Usage.InputTokens))
-	metrics.ClaudeAPITokensTotal.WithLabelValues("output").Add(float64(resp.Usage.OutputTokens))
+	metrics.RecordClaudeAPICall(ctx, "success")
+	metrics.AddClaudeAPITokens(ctx, "input", int64(resp.Usage.InputTokens))
+	metrics.AddClaudeAPITokens(ctx, "output", int64(resp.Usage.OutputTokens))
 
 	c.logger.InfoContext(ctx, "received response from Claude",
 		slog.String("stop_reason", string(resp.StopReason)),

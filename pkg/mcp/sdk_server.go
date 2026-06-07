@@ -205,7 +205,14 @@ func (s *SDKServer) registerGrafanaTools() {
 		toolGrafanaRestoreDashboardVersion: s.legacy.executeGrafanaRestoreDashboardVersion,
 	}
 
-	for _, t := range getGrafanaTools() {
+	// In read-only mode only the Grafana read tools are exposed; the write
+	// tools (the toolset's only mutation surface) are withheld entirely.
+	grafanaTools := getGrafanaReadTools()
+	if !s.legacy.readOnly {
+		grafanaTools = append(grafanaTools, getGrafanaWriteTools()...)
+	}
+
+	for _, t := range grafanaTools {
 		if h, ok := handlers[t.Name]; ok {
 			s.registerTool(t.Name, t.Description, t.InputSchema, h)
 		}

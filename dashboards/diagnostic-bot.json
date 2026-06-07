@@ -1,0 +1,327 @@
+{
+  "title": "Diagnostic Bot",
+  "uid": "diagnostic-bot",
+  "tags": ["diagnostic-bot", "katn"],
+  "schemaVersion": 39,
+  "editable": true,
+  "time": { "from": "now-6h", "to": "now" },
+  "refresh": "30s",
+  "templating": {
+    "list": [
+      {
+        "name": "prometheus",
+        "label": "Prometheus",
+        "type": "datasource",
+        "query": "prometheus",
+        "current": {},
+        "hide": 0
+      },
+      {
+        "name": "loki",
+        "label": "Loki",
+        "type": "datasource",
+        "query": "loki",
+        "current": {},
+        "hide": 0
+      },
+      {
+        "name": "tempo",
+        "label": "Tempo",
+        "type": "datasource",
+        "query": "tempo",
+        "current": {},
+        "hide": 0
+      },
+      {
+        "name": "namespace",
+        "label": "Namespace",
+        "type": "query",
+        "datasource": { "type": "prometheus", "uid": "${prometheus}" },
+        "query": "label_values(investigations_started_total, namespace)",
+        "refresh": 2,
+        "includeAll": true,
+        "current": {}
+      },
+      {
+        "name": "pod",
+        "label": "Pod",
+        "type": "query",
+        "datasource": { "type": "prometheus", "uid": "${prometheus}" },
+        "query": "label_values(container_cpu_usage_seconds_total{namespace=~\"$namespace\", pod=~\"diagnostic-bot.*\"}, pod)",
+        "refresh": 2,
+        "includeAll": true,
+        "current": {}
+      }
+    ]
+  },
+  "panels": [
+    {
+      "type": "row",
+      "title": "Golden Signals",
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 0 },
+      "id": 1
+    },
+    {
+      "type": "timeseries",
+      "title": "Investigation Traffic",
+      "description": "Investigations started per second, by type.",
+      "id": 2,
+      "datasource": { "type": "prometheus", "uid": "${prometheus}" },
+      "gridPos": { "h": 8, "w": 8, "x": 0, "y": 1 },
+      "fieldConfig": { "defaults": { "unit": "reqps", "custom": { "drawStyle": "line", "fillOpacity": 10 } }, "overrides": [] },
+      "targets": [
+        { "refId": "A", "expr": "sum by (type) (rate(investigations_started_total[5m]))", "legendFormat": "{{type}}" }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "Investigation Errors",
+      "description": "Errored investigations and tool executions per second.",
+      "id": 3,
+      "datasource": { "type": "prometheus", "uid": "${prometheus}" },
+      "gridPos": { "h": 8, "w": 8, "x": 8, "y": 1 },
+      "fieldConfig": { "defaults": { "unit": "reqps", "custom": { "drawStyle": "line", "fillOpacity": 10 } }, "overrides": [] },
+      "targets": [
+        { "refId": "A", "expr": "sum(rate(investigation_duration_seconds_count{status=\"error\"}[5m]))", "legendFormat": "investigation errors" },
+        { "refId": "B", "expr": "sum(rate(tool_executions_total{status=\"error\"}[5m]))", "legendFormat": "tool errors" }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "Investigation Latency",
+      "description": "Investigation duration quantiles. Latency is an SLO budget: thresholds are fixed, not resource-proportional.",
+      "id": 4,
+      "datasource": { "type": "prometheus", "uid": "${prometheus}" },
+      "gridPos": { "h": 8, "w": 8, "x": 16, "y": 1 },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s",
+          "custom": { "drawStyle": "line", "fillOpacity": 0 },
+          "thresholds": { "mode": "absolute", "steps": [ { "color": "green", "value": null }, { "color": "yellow", "value": 120 }, { "color": "red", "value": 300 } ] }
+        },
+        "overrides": []
+      },
+      "targets": [
+        { "refId": "A", "expr": "histogram_quantile(0.50, sum by (le) (rate(investigation_duration_seconds_bucket[5m])))", "legendFormat": "p50" },
+        { "refId": "B", "expr": "histogram_quantile(0.90, sum by (le) (rate(investigation_duration_seconds_bucket[5m])))", "legendFormat": "p90" },
+        { "refId": "C", "expr": "histogram_quantile(0.99, sum by (le) (rate(investigation_duration_seconds_bucket[5m])))", "legendFormat": "p99" }
+      ]
+    },
+    {
+      "type": "stat",
+      "title": "Investigations In Flight",
+      "description": "Saturation: investigations currently executing.",
+      "id": 5,
+      "datasource": { "type": "prometheus", "uid": "${prometheus}" },
+      "gridPos": { "h": 6, "w": 8, "x": 0, "y": 9 },
+      "fieldConfig": { "defaults": { "unit": "short", "thresholds": { "mode": "absolute", "steps": [ { "color": "green", "value": null } ] } }, "overrides": [] },
+      "options": { "reduceOptions": { "calcs": ["lastNotNull"] }, "colorMode": "value" },
+      "targets": [ { "refId": "A", "expr": "sum(investigations_in_flight)", "legendFormat": "in flight" } ]
+    },
+    {
+      "type": "stat",
+      "title": "Active Conversations",
+      "description": "Open Slack investigation conversations.",
+      "id": 6,
+      "datasource": { "type": "prometheus", "uid": "${prometheus}" },
+      "gridPos": { "h": 6, "w": 8, "x": 8, "y": 9 },
+      "fieldConfig": { "defaults": { "unit": "short", "thresholds": { "mode": "absolute", "steps": [ { "color": "green", "value": null } ] } }, "overrides": [] },
+      "options": { "reduceOptions": { "calcs": ["lastNotNull"] }, "colorMode": "value" },
+      "targets": [ { "refId": "A", "expr": "sum(conversations_active)", "legendFormat": "active" } ]
+    },
+    {
+      "type": "timeseries",
+      "title": "Injection Defangs (Active-Probe Signal)",
+      "description": "Forged control sequences defanged from untrusted tool output. Any sustained signal here is a probe, not noise.",
+      "id": 7,
+      "datasource": { "type": "prometheus", "uid": "${prometheus}" },
+      "gridPos": { "h": 6, "w": 8, "x": 16, "y": 9 },
+      "fieldConfig": { "defaults": { "unit": "short", "custom": { "drawStyle": "bars", "fillOpacity": 60 } }, "overrides": [] },
+      "targets": [ { "refId": "A", "expr": "sum by (category) (rate(injection_defangs_total[5m]))", "legendFormat": "{{category}}" } ]
+    },
+    {
+      "type": "row",
+      "title": "Tools And Model",
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 15 },
+      "id": 8
+    },
+    {
+      "type": "timeseries",
+      "title": "Tool Executions By Status",
+      "description": "Tool dispatch rate split by success and error.",
+      "id": 9,
+      "datasource": { "type": "prometheus", "uid": "${prometheus}" },
+      "gridPos": { "h": 8, "w": 8, "x": 0, "y": 16 },
+      "fieldConfig": { "defaults": { "unit": "reqps", "custom": { "drawStyle": "line", "fillOpacity": 10 } }, "overrides": [] },
+      "targets": [ { "refId": "A", "expr": "sum by (status) (rate(tool_executions_total[5m]))", "legendFormat": "{{status}}" } ]
+    },
+    {
+      "type": "timeseries",
+      "title": "Top Tools By Call Rate",
+      "description": "Most-used tools over the window.",
+      "id": 10,
+      "datasource": { "type": "prometheus", "uid": "${prometheus}" },
+      "gridPos": { "h": 8, "w": 8, "x": 8, "y": 16 },
+      "fieldConfig": { "defaults": { "unit": "reqps", "custom": { "drawStyle": "line", "fillOpacity": 10 } }, "overrides": [] },
+      "targets": [ { "refId": "A", "expr": "topk(10, sum by (tool_name) (rate(tool_executions_total[5m])))", "legendFormat": "{{tool_name}}" } ]
+    },
+    {
+      "type": "timeseries",
+      "title": "Claude API Calls And Tokens",
+      "description": "Claude API call rate by status and token throughput by type.",
+      "id": 11,
+      "datasource": { "type": "prometheus", "uid": "${prometheus}" },
+      "gridPos": { "h": 8, "w": 8, "x": 16, "y": 16 },
+      "fieldConfig": { "defaults": { "unit": "short", "custom": { "drawStyle": "line", "fillOpacity": 10 } }, "overrides": [] },
+      "targets": [
+        { "refId": "A", "expr": "sum by (status) (rate(claude_api_calls_total[5m]))", "legendFormat": "calls {{status}}" },
+        { "refId": "B", "expr": "sum by (token_type) (rate(claude_api_tokens_total[5m]))", "legendFormat": "tokens {{token_type}}" }
+      ]
+    },
+    {
+      "type": "row",
+      "title": "Logs And Traces",
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 24 },
+      "id": 12
+    },
+    {
+      "type": "logs",
+      "title": "Service Logs",
+      "description": "Structured JSON logs for the bot. Lines within a span carry trace_id/span_id.",
+      "id": 13,
+      "datasource": { "type": "loki", "uid": "${loki}" },
+      "gridPos": { "h": 10, "w": 14, "x": 0, "y": 25 },
+      "options": { "showLabels": false, "showTime": true, "wrapLogMessage": true, "sortOrder": "Descending" },
+      "targets": [
+        { "refId": "A", "expr": "{namespace=~\"$namespace\", pod=~\"diagnostic-bot.*\"} | json", "queryType": "range" }
+      ]
+    },
+    {
+      "type": "traces",
+      "title": "Recent Traces",
+      "description": "Investigation and tool-dispatch spans.",
+      "id": 14,
+      "datasource": { "type": "tempo", "uid": "${tempo}" },
+      "gridPos": { "h": 10, "w": 10, "x": 14, "y": 25 },
+      "targets": [
+        { "refId": "A", "queryType": "traceql", "query": "{ resource.service.name = \"diagnostic-bot\" }", "limit": 20 }
+      ]
+    },
+    {
+      "type": "row",
+      "title": "Kubernetes Resources",
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 35 },
+      "id": 15
+    },
+    {
+      "type": "timeseries",
+      "title": "CPU Utilization (% Of Limit)",
+      "description": "Container CPU usage as a percentage of its limit. Approaching 100% means throttling. Under-provisioned if sustained high.",
+      "id": 16,
+      "datasource": { "type": "prometheus", "uid": "${prometheus}" },
+      "gridPos": { "h": 8, "w": 8, "x": 0, "y": 36 },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percent",
+          "max": 100,
+          "custom": { "drawStyle": "line", "fillOpacity": 10 },
+          "thresholds": { "mode": "absolute", "steps": [ { "color": "green", "value": null }, { "color": "yellow", "value": 75 }, { "color": "red", "value": 90 } ] }
+        },
+        "overrides": []
+      },
+      "targets": [
+        { "refId": "A", "expr": "100 * sum by (pod) (rate(container_cpu_usage_seconds_total{namespace=~\"$namespace\", pod=~\"diagnostic-bot.*\", container!=\"\"}[5m])) / sum by (pod) (kube_pod_container_resource_limits{namespace=~\"$namespace\", pod=~\"diagnostic-bot.*\", resource=\"cpu\"})", "legendFormat": "{{pod}}" }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "CPU Utilization (% Of Request)",
+      "description": "Container CPU usage as a percentage of its request. Riding far below 100% wastes reserved capacity; above 100% (the reference line) risks eviction under node pressure.",
+      "id": 17,
+      "datasource": { "type": "prometheus", "uid": "${prometheus}" },
+      "gridPos": { "h": 8, "w": 8, "x": 8, "y": 36 },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percent",
+          "custom": { "drawStyle": "line", "fillOpacity": 10, "thresholdsStyle": { "mode": "line" } },
+          "thresholds": { "mode": "absolute", "steps": [ { "color": "green", "value": null }, { "color": "blue", "value": 100 } ] }
+        },
+        "overrides": []
+      },
+      "targets": [
+        { "refId": "A", "expr": "100 * sum by (pod) (rate(container_cpu_usage_seconds_total{namespace=~\"$namespace\", pod=~\"diagnostic-bot.*\", container!=\"\"}[5m])) / sum by (pod) (kube_pod_container_resource_requests{namespace=~\"$namespace\", pod=~\"diagnostic-bot.*\", resource=\"cpu\"})", "legendFormat": "{{pod}}" }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "CPU Throttling (% Of Periods)",
+      "description": "Share of CFS periods in which the container was throttled. Leading indicator of CPU starvation — climbs before latency does.",
+      "id": 18,
+      "datasource": { "type": "prometheus", "uid": "${prometheus}" },
+      "gridPos": { "h": 8, "w": 8, "x": 16, "y": 36 },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percent",
+          "max": 100,
+          "custom": { "drawStyle": "line", "fillOpacity": 10 },
+          "thresholds": { "mode": "absolute", "steps": [ { "color": "green", "value": null }, { "color": "yellow", "value": 25 }, { "color": "red", "value": 50 } ] }
+        },
+        "overrides": []
+      },
+      "targets": [
+        { "refId": "A", "expr": "100 * sum by (pod) (rate(container_cpu_cfs_throttled_periods_total{namespace=~\"$namespace\", pod=~\"diagnostic-bot.*\", container!=\"\"}[5m])) / sum by (pod) (rate(container_cpu_cfs_periods_total{namespace=~\"$namespace\", pod=~\"diagnostic-bot.*\", container!=\"\"}[5m]))", "legendFormat": "{{pod}}" }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "Memory Utilization (% Of Limit)",
+      "description": "Working-set memory as a percentage of its limit. Approaching 100% risks OOM-kill.",
+      "id": 19,
+      "datasource": { "type": "prometheus", "uid": "${prometheus}" },
+      "gridPos": { "h": 8, "w": 8, "x": 0, "y": 44 },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percent",
+          "max": 100,
+          "custom": { "drawStyle": "line", "fillOpacity": 10 },
+          "thresholds": { "mode": "absolute", "steps": [ { "color": "green", "value": null }, { "color": "yellow", "value": 75 }, { "color": "red", "value": 90 } ] }
+        },
+        "overrides": []
+      },
+      "targets": [
+        { "refId": "A", "expr": "100 * sum by (pod) (container_memory_working_set_bytes{namespace=~\"$namespace\", pod=~\"diagnostic-bot.*\", container!=\"\"}) / sum by (pod) (kube_pod_container_resource_limits{namespace=~\"$namespace\", pod=~\"diagnostic-bot.*\", resource=\"memory\"})", "legendFormat": "{{pod}}" }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "Memory Utilization (% Of Request)",
+      "description": "Working-set memory as a percentage of its request. Below 100% is reserved-but-unused; above 100% (reference line) is under-requested.",
+      "id": 20,
+      "datasource": { "type": "prometheus", "uid": "${prometheus}" },
+      "gridPos": { "h": 8, "w": 8, "x": 8, "y": 44 },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percent",
+          "custom": { "drawStyle": "line", "fillOpacity": 10, "thresholdsStyle": { "mode": "line" } },
+          "thresholds": { "mode": "absolute", "steps": [ { "color": "green", "value": null }, { "color": "blue", "value": 100 } ] }
+        },
+        "overrides": []
+      },
+      "targets": [
+        { "refId": "A", "expr": "100 * sum by (pod) (container_memory_working_set_bytes{namespace=~\"$namespace\", pod=~\"diagnostic-bot.*\", container!=\"\"}) / sum by (pod) (kube_pod_container_resource_requests{namespace=~\"$namespace\", pod=~\"diagnostic-bot.*\", resource=\"memory\"})", "legendFormat": "{{pod}}" }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "Memory Working Set",
+      "description": "Absolute working-set memory per pod.",
+      "id": 21,
+      "datasource": { "type": "prometheus", "uid": "${prometheus}" },
+      "gridPos": { "h": 8, "w": 8, "x": 16, "y": 44 },
+      "fieldConfig": { "defaults": { "unit": "bytes", "custom": { "drawStyle": "line", "fillOpacity": 10 } }, "overrides": [] },
+      "targets": [
+        { "refId": "A", "expr": "sum by (pod) (container_memory_working_set_bytes{namespace=~\"$namespace\", pod=~\"diagnostic-bot.*\", container!=\"\"})", "legendFormat": "{{pod}}" }
+      ]
+    }
+  ]
+}

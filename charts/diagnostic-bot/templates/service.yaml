@@ -1,0 +1,21 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "diagnostic-bot.fullname" . }}
+  labels:
+    {{- include "diagnostic-bot.labels" . | nindent 4 }}
+spec:
+  type: ClusterIP
+  selector:
+    {{- include "diagnostic-bot.selectorLabels" . | nindent 4 }}
+  ports:
+    - name: metrics
+      port: {{ .Values.metricsPort }}
+      targetPort: metrics
+      protocol: TCP
+    {{- if .Values.mcpHttp.enabled }}
+    - name: mcp
+      port: {{ .Values.mcpHttp.port }}
+      targetPort: mcp
+      protocol: TCP
+    {{- end }}

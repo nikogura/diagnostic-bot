@@ -1,0 +1,83 @@
+replicaCount: 1
+
+image:
+  repository: ghcr.io/nikogura/diagnostic-bot
+  pullPolicy: IfNotPresent
+  # Defaults to the chart appVersion when empty.
+  tag: ""
+
+imagePullSecrets: []
+nameOverride: ""
+fullnameOverride: ""
+
+serviceAccount:
+  create: true
+  name: ""
+  annotations: {}
+
+# Port the bot serves /metrics and health probes on (admin port, never the
+# client-facing MCP port).
+metricsPort: 9090
+
+# Externally-facing MCP HTTP server for power users running their own MCP client.
+mcpHttp:
+  enabled: false
+  port: 8090
+
+# Non-secret configuration, surfaced as environment variables. List-valued vars
+# accept commas AND newlines, so a YAML block scalar stays readable.
+config:
+  LOKI_ENDPOINT: ""
+  CLAUDE_MODEL: "claude-sonnet-4-5-20250929"
+  OTEL_EXPORTER_OTLP_ENDPOINT: ""
+  # Extra raw env vars, merged verbatim.
+  extraEnv: {}
+
+# Secret holding SLACK_BOT_TOKEN, SLACK_APP_TOKEN, ANTHROPIC_API_KEY, etc.
+# Mounted via envFrom so rotation is a secret change, not a manifest change.
+existingSecret: ""
+
+# Resource requests/limits. Both are set so the dashboard's "% of request" and
+# "% of limit" panels are meaningful.
+resources:
+  requests:
+    cpu: 100m
+    memory: 256Mi
+  limits:
+    cpu: "1"
+    memory: 1Gi
+
+podAnnotations: {}
+
+podSecurityContext:
+  runAsNonRoot: true
+  runAsUser: 1000
+  runAsGroup: 1000
+  fsGroup: 1000
+
+securityContext:
+  allowPrivilegeEscalation: false
+  readOnlyRootFilesystem: false
+  capabilities:
+    drop: ["ALL"]
+
+nodeSelector: {}
+tolerations: []
+affinity: {}
+
+# Prometheus Operator monitors. Both forms are shipped; enable whichever your
+# cluster scrapes with.
+serviceMonitor:
+  enabled: true
+  interval: 30s
+  scrapeTimeout: 10s
+  labels: {}
+
+podMonitor:
+  enabled: false
+  interval: 30s
+  labels: {}
+
+# The Grafana dashboard ships as a JSON artifact at dashboards/diagnostic-bot.json.
+# Import it through whatever dashboard provisioning you already run; the chart
+# does not impose a delivery mechanism.
