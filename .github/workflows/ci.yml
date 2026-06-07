@@ -90,11 +90,11 @@ jobs:
       with:
         version: v3.16.3
 
-    - name: Test (unit + distro renders)
-      run: make test
-
     - name: Lint Checks
       run: make lint
+
+    - name: Test (unit + distro renders)
+      run: make test
 
   publish:
     name: Publish
