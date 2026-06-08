@@ -74,6 +74,10 @@ func (s *SDKServer) registerTool(name, description string, schema map[string]int
 			return result, err
 		}
 
+		// Bound the result so an uncapped tool can't return a pathological
+		// payload to an external MCP client.
+		text = capToolResult(text, s.legacy.maxToolOutputBytes)
+
 		result = &sdkmcp.CallToolResult{
 			Content: []sdkmcp.Content{
 				&sdkmcp.TextContent{Text: text},

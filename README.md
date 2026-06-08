@@ -100,6 +100,7 @@ All configuration is via environment variables.
 | `MCP_HTTP_PORT` | `8090` | Port for the MCP HTTP server |
 | `MCP_PUBLIC_URL` | — | Externally reachable base URL (required for Google OAuth) |
 | `MCP_AUDIT_USER` | OS user | Identity stamped on Grafana writes |
+| `MCP_MAX_TOOL_OUTPUT_BYTES` | `1000000` | Cap on a single tool result returned to any caller; oversized output is truncated with a notice |
 
 ### Observability
 

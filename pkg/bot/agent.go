@@ -197,9 +197,39 @@ func (r *InvestigationRunner) runTool(ctx context.Context, toolUse claude.ToolUs
 	}
 
 	metrics.RecordToolExecution(ctx, toolUse.Name, "success")
-	content = r.filterToolOutput(ctx, toolUse.Name, raw)
+
+	if len(raw) > maxToolResultBytes {
+		r.logger.WarnContext(ctx, "tool output truncated before returning to the model",
+			slog.String("tool", toolUse.Name),
+			slog.Int("bytes", len(raw)),
+			slog.Int("cap", maxToolResultBytes))
+		span.SetAttributes(attribute.Bool("tool.output_truncated", true))
+	}
+
+	content = r.filterToolOutput(ctx, toolUse.Name, capToolOutput(raw))
 
 	return content, isError
+}
+
+// maxToolResultBytes bounds how much of a single tool result is fed back to the
+// model. Without it, a tool returning a huge payload (a broad Prometheus range
+// query, a large resource dump, an unfiltered log query) blows past the model's
+// context limit — a ~27MB result was ~6.9M tokens, far over the 1M maximum.
+const maxToolResultBytes = 50_000
+
+// capToolOutput truncates oversized tool output at a UTF-8 boundary and appends
+// a notice telling the model to narrow its query.
+func capToolOutput(raw string) (capped string) {
+	if len(raw) <= maxToolResultBytes {
+		capped = raw
+		return capped
+	}
+
+	truncated := strings.ToValidUTF8(raw[:maxToolResultBytes], "")
+	capped = fmt.Sprintf("%s\n\n[tool output truncated: %d of %d bytes shown. Narrow the query — a tighter time range, more specific filters, or a smaller scope — to see the rest.]",
+		truncated, len(truncated), len(raw))
+
+	return capped
 }
 
 // filterToolOutput applies the inbound defanger then the outbound secret

@@ -5,7 +5,9 @@ import (
 	"encoding/json"
 	"errors"
 	"log/slog"
+	"strings"
 	"testing"
+	"unicode/utf8"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -239,6 +241,45 @@ func TestConvertToolDefinitions(t *testing.T) {
 	assert.Equal(t, "query_loki", out[0].Name)
 	assert.Equal(t, "query logs", out[0].Description)
 	assert.NotNil(t, out[0].InputSchema)
+}
+
+func TestCapToolOutput(t *testing.T) {
+	t.Parallel()
+
+	t.Run("under the cap is unchanged", func(t *testing.T) {
+		t.Parallel()
+		in := "small result"
+		if got := capToolOutput(in); got != in {
+			t.Errorf("expected unchanged, got %q", got)
+		}
+	})
+
+	t.Run("over the cap is truncated with a notice", func(t *testing.T) {
+		t.Parallel()
+		in := strings.Repeat("a", maxToolResultBytes*3)
+		got := capToolOutput(in)
+
+		if len(got) >= len(in) {
+			t.Errorf("expected truncation, got len %d (input %d)", len(got), len(in))
+		}
+		if !strings.Contains(got, "truncated") || !strings.Contains(got, "Narrow the query") {
+			t.Errorf("expected a truncation notice, got tail: %q", got[len(got)-120:])
+		}
+		if !strings.HasPrefix(got, strings.Repeat("a", 100)) {
+			t.Error("expected the head of the output to be preserved")
+		}
+	})
+
+	t.Run("truncation at a multibyte boundary stays valid UTF-8", func(t *testing.T) {
+		t.Parallel()
+		// 3-byte runes so the byte cap lands mid-rune.
+		in := strings.Repeat("世", maxToolResultBytes)
+		got := capToolOutput(in)
+
+		if !utf8.ValidString(got) {
+			t.Error("capped output must be valid UTF-8")
+		}
+	})
 }
 
 func TestFilterPDFTool(t *testing.T) {

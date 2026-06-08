@@ -64,6 +64,7 @@ type Server struct {
 	companyName             string
 	auditUser               string
 	readOnly                bool
+	maxToolOutputBytes      int
 }
 
 // NewServer creates a new MCP server.
@@ -162,6 +163,7 @@ func NewServer(lokiClient *k8s.LokiClient, githubToken string, apiToolRegistry *
 		companyName:             companyName,
 		auditUser:               resolveAuditUser(logger),
 		readOnly:                ReadOnlyEnabled(),
+		maxToolOutputBytes:      resolveMaxToolOutputBytes(),
 	}
 
 	if result.readOnly {
@@ -947,6 +949,10 @@ func (s *Server) dispatchToolCall(ctx context.Context, toolName string, args map
 // front-end drives one identical, gated tool surface.
 func (s *Server) DispatchTool(ctx context.Context, name string, args map[string]interface{}) (result string, err error) {
 	result, err = s.dispatchToolCall(ctx, name, args)
+	if err == nil {
+		result = capToolResult(result, s.maxToolOutputBytes)
+	}
+
 	return result, err
 }
 
