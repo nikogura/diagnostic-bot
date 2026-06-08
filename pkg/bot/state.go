@@ -31,6 +31,7 @@ type Conversation struct {
 	State               ConversationState
 	LastOutput          string // Most recent investigation/follow-up output
 	OriginalUserMessage string // The message that triggered the investigation
+	PDFEnabled          bool   // Whether to generate PDF reports in this thread
 }
 
 // ConversationStore manages active conversations.
@@ -66,6 +67,7 @@ func (cs *ConversationStore) Create(threadTS string, channel string, userID stri
 		MessageHistory:    make([]anthropic.Message, 0),
 		KubernetesContext: make(map[string]interface{}),
 		State:             ConversationStateActive,
+		PDFEnabled:        true,
 	}
 
 	cs.conversations[threadTS] = conv
@@ -113,6 +115,17 @@ func (cs *ConversationStore) SetState(threadTS string, state ConversationState) 
 
 	if conv, exists := cs.conversations[threadTS]; exists {
 		conv.State = state
+		conv.LastActivity = time.Now()
+	}
+}
+
+// SetPDFEnabled toggles PDF report generation for a conversation.
+func (cs *ConversationStore) SetPDFEnabled(threadTS string, enabled bool) {
+	cs.mu.Lock()
+	defer cs.mu.Unlock()
+
+	if conv, exists := cs.conversations[threadTS]; exists {
+		conv.PDFEnabled = enabled
 		conv.LastActivity = time.Now()
 	}
 }

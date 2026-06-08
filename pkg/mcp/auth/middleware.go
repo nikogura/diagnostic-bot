@@ -49,7 +49,7 @@ func WithAuth(method Method, resourceMetadataURL string, logger *slog.Logger) (w
 
 // ResultFromContext returns the verified auth Result associated with the
 // request, or nil when the request didn't pass through WithAuth (notably
-// the slackbot's stdio path, which has no HTTP context).
+// the in-process Slack-bot path, which has no HTTP context).
 func ResultFromContext(ctx context.Context) (result *Result) {
 	v, ok := ctx.Value(resultContextKey{}).(*Result)
 	if !ok {

@@ -147,8 +147,9 @@ func (b *Bot) startInvestigation(ctx context.Context, channel string, threadTS s
 	// Store original user message for thread context
 	conv.OriginalUserMessage = message
 
-	// Run investigation via Claude Code
-	investigationResult, err := b.runner.RunInvestigation(ctx, matchResult.Skill, message)
+	// Run the investigation
+	pdfEnabled := b.pdfEnabledFor(conv)
+	investigationResult, err := b.runner.RunInvestigation(ctx, matchResult.Skill, message, pdfEnabled)
 	if err != nil {
 		b.sendErrorMessage(channel, threadTS, fmt.Sprintf("Error starting investigation: %v", err))
 		return
@@ -165,7 +166,9 @@ func (b *Bot) startInvestigation(ctx context.Context, channel string, threadTS s
 	}
 
 	// Check for and upload any generated PDF files
-	b.scanAndUploadPDFs(channel, threadTS)
+	if pdfEnabled {
+		b.scanAndUploadPDFs(channel, threadTS)
+	}
 
 	// Update reaction to show we're done
 	err = b.slackClient.RemoveReaction("eyes", slack.ItemRef{
@@ -209,6 +212,13 @@ func (b *Bot) handleThreadReply(ctx context.Context, channel string, threadTS st
 		return
 	}
 
+	// A bare "disable reports" / "resume pdfs" style message toggles PDF
+	// generation for this thread instead of starting an investigation.
+	if matched, enable := detectPDFCommand(message); matched {
+		b.handlePDFCommand(channel, threadTS, enable)
+		return
+	}
+
 	// Add reaction to show we're working
 	err := b.slackClient.AddReaction("thinking_face", slack.ItemRef{
 		Channel:   channel,
@@ -243,8 +253,9 @@ func (b *Bot) handleThreadReply(ctx context.Context, channel string, threadTS st
 			conv.OriginalUserMessage, priorOutput, message)
 	}
 
-	// Run follow-up investigation via Claude Code
-	investigationResult, err := b.runner.RunInvestigation(ctx, skill, followUpMessage)
+	// Run the follow-up investigation
+	pdfEnabled := b.pdfEnabledFor(conv)
+	investigationResult, err := b.runner.RunInvestigation(ctx, skill, followUpMessage, pdfEnabled)
 	if err != nil {
 		b.sendErrorMessage(channel, threadTS, fmt.Sprintf("Error processing follow-up: %v", err))
 		return
@@ -261,7 +272,9 @@ func (b *Bot) handleThreadReply(ctx context.Context, channel string, threadTS st
 	}
 
 	// Check for and upload any generated PDF files
-	b.scanAndUploadPDFs(channel, threadTS)
+	if pdfEnabled {
+		b.scanAndUploadPDFs(channel, threadTS)
+	}
 
 	// Remove working reaction
 	err = b.slackClient.RemoveReaction("thinking_face", slack.ItemRef{
@@ -270,6 +283,34 @@ func (b *Bot) handleThreadReply(ctx context.Context, channel string, threadTS st
 	})
 	if err != nil {
 		b.logger.WarnContext(ctx, "failed to remove reaction", slog.String("error", err.Error()))
+	}
+}
+
+// pdfEnabledFor reports whether PDF generation should run for a conversation:
+// it requires both the global switch to be on and the per-thread toggle.
+func (b *Bot) pdfEnabledFor(conv *Conversation) (enabled bool) {
+	enabled = !b.pdfDisabled && conv.PDFEnabled
+	return enabled
+}
+
+// handlePDFCommand applies a per-thread PDF on/off command and confirms it.
+func (b *Bot) handlePDFCommand(channel string, threadTS string, enable bool) {
+	b.conversations.SetPDFEnabled(threadTS, enable)
+
+	var confirmation string
+
+	switch {
+	case enable && b.pdfDisabled:
+		confirmation = "📄 PDF reports are disabled by server configuration, so they stay off for now."
+	case enable:
+		confirmation = "📄 PDF reports re-enabled for this thread."
+	default:
+		confirmation = "📄 PDF reports disabled for this thread. Say \"resume reports\" to turn them back on."
+	}
+
+	sendErr := b.sendFormattedMessage(channel, threadTS, confirmation)
+	if sendErr != nil {
+		b.logger.Error("failed to send PDF command confirmation", slog.String("error", sendErr.Error()))
 	}
 }
 
@@ -421,15 +462,10 @@ func (b *Bot) waitForFileStable(filePath string, timeout time.Duration) (result 
 	return result, err
 }
 
-// scanAndUploadPDFs scans common directories for PDF files and uploads them to Slack.
-// This is called after Claude Code investigations complete to automatically upload any generated reports.
+// scanAndUploadPDFs scans for generated PDF files and uploads them to Slack.
+// The generate_pdf tool writes reports to /tmp, so that is the only location to scan.
 func (b *Bot) scanAndUploadPDFs(channel string, threadTS string) {
-	searchDirs := []string{
-		"/tmp",
-		"/app/reports",
-		"/app",      // Claude might create PDFs in working directory
-		"/home/bot", // Claude's home directory
-	}
+	searchDirs := []string{"/tmp"}
 
 	b.logger.Info("scanning for PDF files to upload",
 		slog.Any("search_dirs", searchDirs),

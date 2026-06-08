@@ -29,8 +29,8 @@ const auditUserFallback = "mcp-server"
 // Priority:
 //  1. MCP_AUDIT_USER env var — explicit override. Use this in containers,
 //     CI, or anywhere the OS user isn't the right name to stamp on writes.
-//  2. user.Current() — for local Claude Code over stdio, this is the
-//     developer running Claude Code. Automatic, true.
+//  2. user.Current() — when the MCP server runs locally, this is the OS
+//     user that started it. Automatic, true.
 //  3. auditUserFallback constant — should rarely hit; warns if it does.
 //
 // This is the *default* identity; per-request overrides via WithAuditUser
@@ -98,18 +98,18 @@ func composeVersionNote(auditUser, intention, defaultIntention string) (note str
 	return note
 }
 
-// auditSourceIPKey is the private context key the HTTP/SSE middleware
+// auditSourceIPKey is the private context key the HTTP middleware
 // uses to thread the resolved client IP down to MCP tool handlers.
 type auditSourceIPKey struct{}
 
-// auditSourceStdio is the value reported when no IP has been injected —
-// the local Slack-bot path uses stdio transport and has no network peer
-// to attribute to. Keeping this as an explicit constant rather than the
-// empty string keeps audit log fields uniform across transports.
-const auditSourceStdio = "stdio"
+// auditSourceLocal is the value reported when no IP has been injected — the
+// in-process Slack-bot path has no network peer to attribute to. Keeping this
+// as an explicit constant rather than the empty string keeps audit log fields
+// uniform across callers.
+const auditSourceLocal = "local"
 
 // WithAuditSourceIP returns a context that carries the client IP for the
-// current request. The HTTP/SSE middleware sets this once per request;
+// current request. The HTTP middleware sets this once per request;
 // MCP tool handlers read it via auditSourceFromContext when emitting
 // audit slog lines for Grafana writes.
 func WithAuditSourceIP(ctx context.Context, ip string) (newCtx context.Context) {
@@ -118,15 +118,15 @@ func WithAuditSourceIP(ctx context.Context, ip string) (newCtx context.Context) 
 }
 
 // auditSourceFromContext returns the audit source for the current request:
-// the IP injected by the HTTP/SSE middleware, or auditSourceStdio when
-// none is present (the Slack-bot stdio path).
+// the IP injected by the HTTP middleware, or auditSourceLocal when none is
+// present (the in-process Slack-bot path).
 func auditSourceFromContext(ctx context.Context) (source string) {
 	v, ok := ctx.Value(auditSourceIPKey{}).(string)
 	if ok && v != "" {
 		source = v
 		return source
 	}
-	source = auditSourceStdio
+	source = auditSourceLocal
 	return source
 }
 
@@ -169,9 +169,9 @@ func extractClientIP(r *http.Request) (ip string) {
 }
 
 // WithAuditSourceMiddleware wraps an http.Handler so each request's
-// resolved client IP is attached to its context. Wrap the MCP HTTP and
-// SSE handlers with this; the IP then flows down to Grafana write
-// handlers and lands in the audit slog line as audit_source_ip.
+// resolved client IP is attached to its context. Wrap the MCP HTTP handler
+// with this; the IP then flows down to Grafana write handlers and lands in
+// the audit slog line as audit_source_ip.
 func WithAuditSourceMiddleware(next http.Handler) (wrapped http.Handler) {
 	wrapped = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		ctx := WithAuditSourceIP(r.Context(), extractClientIP(r))

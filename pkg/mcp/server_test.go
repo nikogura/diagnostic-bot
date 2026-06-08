@@ -685,91 +685,6 @@ func TestGetGrafanaToolsIncludesCreateFolder(t *testing.T) {
 	require.Contains(t, required, "title")
 }
 
-func TestValidatePDFEngine(t *testing.T) {
-	t.Parallel()
-
-	tests := []struct {
-		name    string
-		engine  string
-		wantErr bool
-	}{
-		{"pdflatex allowed", "pdflatex", false},
-		{"xelatex allowed", "xelatex", false},
-		{"lualatex allowed", "lualatex", false},
-		{"tectonic allowed", "tectonic", false},
-		{"wkhtmltopdf allowed", "wkhtmltopdf", false},
-		{"weasyprint allowed", "weasyprint", false},
-		{"prince allowed", "prince", false},
-		{"context allowed", "context", false},
-		{"bash rejected", "bash", true},
-		{"empty rejected", "", true},
-		{"path injection rejected", "/bin/sh", true},
-		{"command injection rejected", "pdflatex; rm -rf /", true},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			t.Parallel()
-			err := validatePDFEngine(tt.engine)
-			if tt.wantErr {
-				require.Error(t, err)
-			} else {
-				require.NoError(t, err)
-			}
-		})
-	}
-}
-
-func TestValidatePDFTemplate(t *testing.T) {
-	t.Parallel()
-
-	tests := []struct {
-		name    string
-		path    string
-		wantErr bool
-	}{
-		{"app path allowed", "/app/latex-templates/company.latex", false},
-		{"etc path allowed", "/etc/pandoc/template.latex", false},
-		{"tmp path allowed", "/tmp/report-template.latex", false},
-		{"home path rejected", "/home/user/evil.latex", true},
-		{"relative path rejected", "../../../etc/passwd", true},
-		{"root path rejected", "/root/template.latex", true},
-		{"empty path rejected", "", true},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			t.Parallel()
-			err := validatePDFTemplate(tt.path)
-			if tt.wantErr {
-				require.Error(t, err)
-			} else {
-				require.NoError(t, err)
-			}
-		})
-	}
-}
-
-func TestGetPDFEngineDefault(t *testing.T) {
-	t.Setenv("PDF_ENGINE", "")
-	require.Equal(t, "pdflatex", getPDFEngine())
-}
-
-func TestGetPDFEngineOverride(t *testing.T) {
-	t.Setenv("PDF_ENGINE", "xelatex")
-	require.Equal(t, "xelatex", getPDFEngine())
-}
-
-func TestGetPDFTemplateDefault(t *testing.T) {
-	t.Setenv("PDF_TEMPLATE", "")
-	require.Equal(t, "/app/latex-templates/company-template.latex", getPDFTemplate())
-}
-
-func TestGetPDFTemplateOverride(t *testing.T) {
-	t.Setenv("PDF_TEMPLATE", "/app/custom/nxdoc.latex")
-	require.Equal(t, "/app/custom/nxdoc.latex", getPDFTemplate())
-}
-
 // TestResolveAuditUserHonorsEnvVar verifies MCP_AUDIT_USER overrides the OS user.
 // This is the explicit-override path — used in containers, CI, or any deployment
 // where the process owner isn't the right identity to stamp on Grafana writes.
@@ -780,8 +695,8 @@ func TestResolveAuditUserHonorsEnvVar(t *testing.T) {
 }
 
 // TestResolveAuditUserFallsBackToOSUser verifies that with no env override
-// the local OS user is used. For Claude Code running the MCP server over
-// stdio, that resolves to the developer's username automatically.
+// the local OS user is used. When the MCP server runs locally, that resolves
+// to the OS user automatically.
 func TestResolveAuditUserFallsBackToOSUser(t *testing.T) {
 	logger := slog.New(slog.NewJSONHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError}))
 	t.Setenv("MCP_AUDIT_USER", "")
@@ -966,7 +881,7 @@ func TestExecuteGrafanaDeleteDashboardLogsAuditUserAndIntention(t *testing.T) {
 	require.Contains(t, logOutput, `"message":"alice: obsolete after migration"`, "logged message is the composed version note that would have landed in Grafana")
 	require.Contains(t, logOutput, `"uid":"dash-uid"`)
 	require.Contains(t, logOutput, `"tool":"grafana_delete_dashboard"`)
-	require.Contains(t, logOutput, `"audit_source_ip":"stdio"`, "no HTTP request → stdio default")
+	require.Contains(t, logOutput, `"audit_source_ip":"local"`, "no HTTP request → local default")
 }
 
 // TestExecuteGrafanaCreateFolderLogsAuditUserAndIntention verifies the
@@ -1001,7 +916,7 @@ func TestExecuteGrafanaCreateFolderLogsAuditUserAndIntention(t *testing.T) {
 	require.Contains(t, logOutput, `"audit_user":"alice"`)
 	require.Contains(t, logOutput, `"message":"alice: grouping ops dashboards"`)
 	require.Contains(t, logOutput, `"tool":"grafana_create_folder"`)
-	require.Contains(t, logOutput, `"audit_source_ip":"stdio"`)
+	require.Contains(t, logOutput, `"audit_source_ip":"local"`)
 }
 
 // TestExecuteGrafanaGetDashboardEmitsUnmodeledFields is the regression
@@ -1203,9 +1118,9 @@ func TestExecuteGrafanaUpdateDashboardInjectsUID(t *testing.T) {
 	require.Contains(t, capturedBody, `"uid":"target-uid"`, "args.uid must be injected into the dashboard payload before POST")
 }
 
-// TestExecuteGrafanaDeleteDashboardLogsHTTPSourceIP verifies the HTTP/SSE
+// TestExecuteGrafanaDeleteDashboardLogsHTTPSourceIP verifies the HTTP
 // transport path: when the request context carries a client IP (injected
-// by the middleware), it lands in the audit slog line instead of "stdio".
+// by the middleware), it lands in the audit slog line instead of "local".
 func TestExecuteGrafanaDeleteDashboardLogsHTTPSourceIP(t *testing.T) {
 	t.Setenv("MCP_AUDIT_USER", "alice")
 
@@ -1758,109 +1673,4 @@ func TestExecuteGrafanaRestoreDashboardVersionRequiresVersion(t *testing.T) {
 	})
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "version")
-}
-
-// TestBuildPandocArgsDisablesRawTeX is the Layer-1 regression guard for
-// the markdown→LaTeX raw_tex extension. With raw_tex enabled (pandoc's
-// default for the markdown reader), attacker-controlled markdown can
-// inject \input{/proc/self/environ} which xelatex resolves and typesets
-// into the PDF — a file-read/secret-exfil primitive. Disabling the
-// extension makes raw LaTeX render as literal text.
-func TestBuildPandocArgsDisablesRawTeX(t *testing.T) {
-	t.Parallel()
-	args := buildPandocArgs("/tmp/out.pdf", "xelatex", "/app/latex-templates/nx.latex", "My Report", "Nx", "/tmp/in.md")
-
-	// Must contain "-f markdown-raw_tex"; must NOT contain bare "markdown".
-	require.Contains(t, args, "-f")
-	idx := indexOfString(args, "-f")
-	require.Greater(t, len(args), idx+1)
-	require.Equal(t, "markdown-raw_tex", args[idx+1], "must explicitly disable raw_tex; bare 'markdown' lets injected LaTeX reach xelatex")
-}
-
-// TestBuildPandocArgsCarriesThroughTrustedFields verifies the helper
-// still hands pandoc the rest of what executeGeneratePDF needs — output
-// path, engine, template, the report's title, the company-name macro,
-// and the input file at the end.
-func TestBuildPandocArgsCarriesThroughTrustedFields(t *testing.T) {
-	t.Parallel()
-	args := buildPandocArgs("/tmp/out.pdf", "xelatex", "/app/latex-templates/nx.latex", "My Report", "Nx", "/tmp/in.md")
-	require.Contains(t, args, "--pdf-engine=xelatex")
-	require.Contains(t, args, "--template=/app/latex-templates/nx.latex")
-	require.Contains(t, args, "-o")
-	require.Contains(t, args, "/tmp/out.pdf")
-	require.Contains(t, args, "title=My Report")
-	require.Contains(t, args, "companyname=Nx")
-	require.Equal(t, "/tmp/in.md", args[len(args)-1], "input path must be the final positional arg")
-}
-
-// TestBuildPandocArgsOmitsTitleWhenEmpty verifies that an empty title
-// doesn't produce an empty -M title= meta var.
-func TestBuildPandocArgsOmitsTitleWhenEmpty(t *testing.T) {
-	t.Parallel()
-	args := buildPandocArgs("/tmp/out.pdf", "xelatex", "/app/latex-templates/nx.latex", "", "Nx", "/tmp/in.md")
-	for _, a := range args {
-		require.NotEqual(t, "title=", a, "empty title must not be passed as a meta var")
-	}
-}
-
-// TestBuildPandocEnvExcludesSecrets is the Layer-2 guard: even with
-// pandoc/xelatex executing, the renderer process must not see app
-// secrets. Set every known credential env var in the test environment;
-// the returned env must contain none of them.
-func TestBuildPandocEnvExcludesSecrets(t *testing.T) {
-	for _, k := range []string{"ANTHROPIC_API_KEY", "GRAFANA_API_KEY", "SLACK_BOT_TOKEN", "SLACK_APP_TOKEN", "GITHUB_TOKEN", "DATABASE_URL"} {
-		t.Setenv(k, "secret-"+k)
-	}
-
-	env := buildPandocEnv("/app/latex-templates")
-	for _, e := range env {
-		for _, secretKey := range []string{"ANTHROPIC_API_KEY", "GRAFANA_API_KEY", "SLACK_BOT_TOKEN", "SLACK_APP_TOKEN", "GITHUB_TOKEN", "DATABASE_URL"} {
-			require.False(t, strings.HasPrefix(e, secretKey+"="), "secret %s must not appear in pandoc env (got %q)", secretKey, e)
-		}
-	}
-}
-
-// TestBuildPandocEnvForwardsTexInputs verifies the legitimate
-// TEXINPUTS path is still threaded so xelatex finds .cls files.
-func TestBuildPandocEnvForwardsTexInputs(t *testing.T) {
-	t.Parallel()
-	env := buildPandocEnv("/app/latex-templates")
-	require.Contains(t, env, "TEXINPUTS=.:/app/latex-templates//:")
-}
-
-// TestBuildPandocEnvAppliesTexLiveHardening verifies the belt-and-suspenders
-// TeX Live env-var guards that block absolute/dotfile reads and writes,
-// even if a future raw-LaTeX leak slips past Layer 1.
-func TestBuildPandocEnvAppliesTexLiveHardening(t *testing.T) {
-	t.Parallel()
-	env := buildPandocEnv("/app/latex-templates")
-	require.Contains(t, env, "openin_any=p")
-	require.Contains(t, env, "openout_any=p")
-	require.Contains(t, env, "shell_escape=f")
-}
-
-// TestBuildPandocEnvCarriesPathAndLocale verifies that the variables
-// pandoc/xelatex/fontconfig genuinely need (PATH, HOME, locale) survive
-// the allowlist — otherwise pandoc can't find binaries or fonts.
-func TestBuildPandocEnvCarriesPathAndLocale(t *testing.T) {
-	t.Setenv("PATH", "/usr/local/bin:/usr/bin")
-	t.Setenv("HOME", "/home/bot")
-	t.Setenv("LANG", "en_US.UTF-8")
-	env := buildPandocEnv("/app/latex-templates")
-	require.Contains(t, env, "PATH=/usr/local/bin:/usr/bin")
-	require.Contains(t, env, "HOME=/home/bot")
-	require.Contains(t, env, "LANG=en_US.UTF-8")
-}
-
-// indexOfString is a test helper for finding a flag's position so we can
-// assert on the value that follows it (e.g. "-f" → "markdown-raw_tex").
-func indexOfString(haystack []string, needle string) (idx int) {
-	for i, s := range haystack {
-		if s == needle {
-			idx = i
-			return idx
-		}
-	}
-	idx = -1
-	return idx
 }

@@ -1,0 +1,15 @@
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: diagnostic-bot
+  labels:
+    app.kubernetes.io/name: diagnostic-bot
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: diagnostic-bot
+subjects:
+  - kind: ServiceAccount
+    name: diagnostic-bot
+    # Namespace is set by the kustomization's `namespace:` field.
+    namespace: diagnostic-bot

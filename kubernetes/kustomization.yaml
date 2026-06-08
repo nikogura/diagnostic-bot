@@ -5,12 +5,16 @@ kind: Kustomization
 # charts/diagnostic-bot is the templated alternative; this is the plain-manifest
 # reference.
 
+namespace: diagnostic-bot
+
 resources:
   - serviceaccount.yaml
   - deployment.yaml
   - service.yaml
   - servicemonitor.yaml
   - podmonitor.yaml
+  - clusterrole.yaml
+  - clusterrolebinding.yaml
 
 labels:
   - pairs:

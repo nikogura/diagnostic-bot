@@ -1,15 +1,12 @@
 package mcp
 
 import (
-	"bufio"
-	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
 
@@ -18,13 +15,6 @@ import (
 	"github.com/nikogura/diagnostic-bot/pkg/apiconfig"
 	"github.com/nikogura/diagnostic-bot/pkg/k8s"
 	"golang.org/x/oauth2"
-)
-
-// MCP method constants.
-const (
-	methodInitialize = "initialize"
-	methodToolsList  = "tools/list"
-	methodToolsCall  = "tools/call"
 )
 
 // Common schema description strings.
@@ -69,6 +59,7 @@ type Server struct {
 	tempoClients            map[string]*TempoClient
 	cloudWatchClientFactory CloudWatchClientFactory
 	apiToolRegistry         *apiconfig.APIToolRegistry
+	k8sClusters             map[string]*k8s.Agent
 	logger                  *slog.Logger
 	companyName             string
 	auditUser               string
@@ -166,6 +157,7 @@ func NewServer(lokiClient *k8s.LokiClient, githubToken string, apiToolRegistry *
 		tempoClients:            tempoClients,
 		cloudWatchClientFactory: defaultCloudWatchClientFactory,
 		apiToolRegistry:         apiToolRegistry,
+		k8sClusters:             loadK8sClusters(logger),
 		logger:                  logger,
 		companyName:             companyName,
 		auditUser:               resolveAuditUser(logger),
@@ -206,93 +198,6 @@ func isWriteTool(name string) (isWrite bool) {
 	}
 
 	return isWrite
-}
-
-// Run starts the MCP server using stdio transport.
-func (s *Server) Run(ctx context.Context) (err error) {
-	scanner := bufio.NewScanner(os.Stdin)
-
-	s.logger.InfoContext(ctx, "MCP server started", slog.String("transport", "stdio"))
-
-	// Send server info
-	s.sendServerInfo()
-
-	for scanner.Scan() {
-		line := scanner.Bytes()
-
-		var request MCPRequest
-
-		err = json.Unmarshal(line, &request)
-		if err != nil {
-			s.logger.WarnContext(ctx, "failed to parse request", slog.String("error", err.Error()))
-			continue
-		}
-
-		s.handleRequest(ctx, request)
-	}
-
-	err = scanner.Err()
-	if err != nil {
-		err = fmt.Errorf("reading stdin: %w", err)
-		return err
-	}
-
-	return err
-}
-
-// sendServerInfo sends the server capabilities to Claude Code.
-func (s *Server) sendServerInfo() {
-	info := MCPServerInfo{
-		ProtocolVersion: "2024-11-05",
-		Capabilities: MCPCapabilities{
-			Tools: map[string]interface{}{},
-		},
-		ServerInfo: ServerMetadata{
-			Name:    "nikogura.com/diagnostic-bot",
-			Version: "0.1.0",
-		},
-	}
-
-	data, _ := json.Marshal(info)
-	fmt.Println(string(data))
-}
-
-// handleRequest processes an MCP request.
-func (s *Server) handleRequest(ctx context.Context, req MCPRequest) {
-	switch req.Method {
-	case methodInitialize:
-		s.handleInitialize(ctx, req)
-
-	case methodToolsList:
-		s.handleListTools(ctx, req)
-
-	case methodToolsCall:
-		s.handleToolCall(ctx, req)
-
-	default:
-		s.sendError(req.ID, fmt.Sprintf("unknown method: %s", req.Method))
-	}
-}
-
-// handleInitialize handles the MCP initialize request.
-func (s *Server) handleInitialize(_ context.Context, req MCPRequest) {
-	response := MCPResponse{
-		JSONRPC: "2.0",
-		ID:      req.ID,
-		Result: map[string]interface{}{
-			"protocolVersion": "2024-11-05",
-			"capabilities": map[string]interface{}{
-				"tools": map[string]interface{}{},
-			},
-			"serverInfo": map[string]interface{}{
-				"name":    "nikogura.com/diagnostic-bot",
-				"version": "0.1.0",
-			},
-		},
-	}
-
-	data, _ := json.Marshal(response)
-	fmt.Println(string(data))
 }
 
 // getLokiTools returns Loki-related tool definitions. When allowedTenants
@@ -363,7 +268,7 @@ func getUtilityTools() (result []MCPTool) {
 		},
 		{
 			Name:        toolGeneratePDF,
-			Description: "Generate a PDF report from Markdown content using pandoc with LaTeX. The PDF will be saved to /tmp/ and automatically uploaded to Slack. ALWAYS use this tool for report generation to provide downloadable reports.",
+			Description: "Generate a PDF report from Markdown content (headings, bold/italic, lists, code blocks, and tables are supported). The PDF will be saved to /tmp/ and automatically uploaded to Slack. ALWAYS use this tool for report generation to provide downloadable reports.",
 			InputSchema: map[string]interface{}{
 				"type": "object",
 				"properties": map[string]interface{}{
@@ -934,6 +839,10 @@ func (s *Server) getToolDefinitions() (result []MCPTool) {
 		result = append(result, getDatabaseTools()...)
 	}
 
+	if len(s.k8sClusters) > 0 {
+		result = append(result, getK8sTools()...)
+	}
+
 	if s.grafanaClient != nil {
 		result = append(result, getGrafanaReadTools()...)
 
@@ -977,45 +886,6 @@ func (s *Server) getToolDefinitions() (result []MCPTool) {
 func (s *Server) ToolDefinitions() (tools []MCPTool) {
 	tools = s.getToolDefinitions()
 	return tools
-}
-
-// handleListTools returns the list of available tools.
-func (s *Server) handleListTools(_ context.Context, req MCPRequest) {
-	tools := s.getToolDefinitions()
-
-	response := MCPResponse{
-		JSONRPC: "2.0",
-		ID:      req.ID,
-		Result: map[string]interface{}{
-			"tools": tools,
-		},
-	}
-
-	data, _ := json.Marshal(response)
-	fmt.Println(string(data))
-}
-
-// handleToolCall executes a tool and returns the result.
-func (s *Server) handleToolCall(ctx context.Context, req MCPRequest) {
-	var params MCPToolCallParams
-
-	paramsJSON, _ := json.Marshal(req.Params)
-
-	err := json.Unmarshal(paramsJSON, &params)
-	if err != nil {
-		s.sendError(req.ID, fmt.Sprintf("invalid params: %v", err))
-		return
-	}
-
-	s.logger.InfoContext(ctx, "executing tool", slog.String("tool", params.Name))
-
-	result, err := s.dispatchToolCall(ctx, params.Name, params.Arguments)
-	if err != nil {
-		s.sendError(req.ID, fmt.Sprintf("tool execution error: %v", err))
-		return
-	}
-
-	s.sendToolResult(req.ID, result)
 }
 
 // dispatchToolCall routes a tool call to the appropriate handler.
@@ -1072,9 +942,9 @@ func (s *Server) dispatchToolCall(ctx context.Context, toolName string, args map
 }
 
 // DispatchTool executes a tool by name in-process and returns its textual
-// result. It is the exact dispatch path used by the MCP stdio and HTTP
-// transports, exposed for in-process callers (the Slack agent loop) so that
-// every front-end drives one identical, gated tool surface.
+// result. It is the exact dispatch path used by the MCP HTTP transport,
+// exposed for in-process callers (the Slack agent loop) so that every
+// front-end drives one identical, gated tool surface.
 func (s *Server) DispatchTool(ctx context.Context, name string, args map[string]interface{}) (result string, err error) {
 	result, err = s.dispatchToolCall(ctx, name, args)
 	return result, err
@@ -1103,6 +973,14 @@ func (s *Server) dispatchExtendedToolCall(ctx context.Context, toolName string, 
 		result, err = s.executeGraphQLQuery(ctx, args)
 	case toolGraphQLListEndpoints:
 		result, err = s.executeGraphQLListEndpoints(ctx, args)
+	case toolK8sGetResource:
+		result, err = s.executeK8sGetResource(ctx, args)
+	case toolK8sPodLogs:
+		result, err = s.executeK8sPodLogs(ctx, args)
+	case toolK8sListPods:
+		result, err = s.executeK8sListPods(ctx, args)
+	case toolK8sGetEvents:
+		result, err = s.executeK8sGetEvents(ctx, args)
 	default:
 		// Try dynamically loaded API tools
 		if s.apiToolRegistry != nil {
@@ -1116,25 +994,6 @@ func (s *Server) dispatchExtendedToolCall(ctx context.Context, toolName string, 
 	}
 
 	return result, err
-}
-
-// sendToolResult sends a successful tool result response.
-func (s *Server) sendToolResult(id interface{}, result string) {
-	response := MCPResponse{
-		JSONRPC: "2.0",
-		ID:      id,
-		Result: map[string]interface{}{
-			"content": []map[string]interface{}{
-				{
-					"type": "text",
-					"text": result,
-				},
-			},
-		},
-	}
-
-	data, _ := json.Marshal(response)
-	fmt.Println(string(data))
 }
 
 // executeQueryLoki executes a Loki query.
@@ -1174,144 +1033,15 @@ func (s *Server) executeQueryLoki(ctx context.Context, args map[string]interface
 
 // executeWhoisLookup performs a whois lookup.
 func (s *Server) executeWhoisLookup(ctx context.Context, args map[string]interface{}) (result string, err error) {
-	var agent *k8s.Agent
-
 	ipAddress, _ := args["ip_address"].(string)
 
-	// Create a temporary k8s agent just for whois (doesn't need k8s client)
-	agent, err = k8s.NewAgent("", s.logger)
-	if err != nil {
-		return result, err
-	}
-
-	result, err = agent.WhoisLookup(ctx, ipAddress)
+	result, err = k8s.NewWhoisClient(s.logger).Lookup(ctx, ipAddress)
 	return result, err
 }
 
-// Allowed pandoc PDF engines — allowlist to prevent command injection via --pdf-engine.
-//
-//nolint:gochecknoglobals // Constant set, initialized once
-var allowedPDFEngines = map[string]bool{
-	"pdflatex":    true,
-	"xelatex":     true,
-	"lualatex":    true,
-	"tectonic":    true,
-	"wkhtmltopdf": true,
-	"weasyprint":  true,
-	"prince":      true,
-	"context":     true,
-}
-
-// Allowed path prefixes for PDF templates — prevents path traversal.
-//
-//nolint:gochecknoglobals // Constant set, initialized once
-var allowedTemplatePrefixes = []string{"/app/", "/etc/", "/tmp/"}
-
-func getPDFEngine() (engine string) {
-	engine = os.Getenv("PDF_ENGINE")
-	if engine == "" {
-		engine = "pdflatex"
-	}
-	return engine
-}
-
-func getPDFTemplate() (tmpl string) {
-	tmpl = os.Getenv("PDF_TEMPLATE")
-	if tmpl == "" {
-		tmpl = "/app/latex-templates/company-template.latex"
-	}
-	return tmpl
-}
-
-func validatePDFEngine(engine string) (err error) {
-	if !allowedPDFEngines[engine] {
-		err = fmt.Errorf("unsupported PDF engine %q: must be one of pdflatex, xelatex, lualatex, tectonic, wkhtmltopdf, weasyprint, prince, context", engine)
-	}
-	return err
-}
-
-func validatePDFTemplate(tmpl string) (err error) {
-	for _, prefix := range allowedTemplatePrefixes {
-		if strings.HasPrefix(tmpl, prefix) {
-			return err
-		}
-	}
-	err = fmt.Errorf("PDF template path %q not under an allowed prefix (/app/, /etc/, /tmp/)", tmpl)
-	return err
-}
-
-// buildPandocArgs assembles the pandoc command-line for a PDF render.
-//
-// Layer-1 security: the markdown reader is invoked as `markdown-raw_tex`,
-// not bare `markdown`, to disable pandoc's raw_tex extension. With
-// raw_tex enabled (pandoc's default), attacker-controlled markdown can
-// inject \input{/proc/self/environ} which xelatex resolves and typesets
-// into the PDF — an arbitrary-file-read / secret-exfiltration primitive.
-// Disabling the extension makes raw LaTeX render as literal text.
-// Math (tex_math_dollars) and other markdown features stay on; raw_tex
-// only governs the untrusted reader, not the trusted --template.
-func buildPandocArgs(outputPath, pdfEngine, pdfTemplate, title, companyName, inputPath string) (args []string) {
-	args = []string{
-		"-f", "markdown-raw_tex",
-		"-t", "pdf",
-		"--pdf-engine=" + pdfEngine,
-		"--template=" + pdfTemplate,
-		"--toc",
-		"--number-sections",
-		"--highlight-style=tango",
-		"-o", outputPath,
-	}
-	if title != "" {
-		args = append(args, "-M", "title="+title)
-	}
-	args = append(args, "-M", "companyname="+companyName)
-	args = append(args, inputPath)
-	return args
-}
-
-// buildPandocEnv assembles a minimal env for the pandoc/xelatex child
-// process. Only allowlisted parent env vars are forwarded (see
-// pandocSafeEnvVars); app secrets are dropped on the floor. TEXINPUTS
-// is set so xelatex finds .cls files under the template directory; the
-// TeX Live hardening vars (openin_any=p, openout_any=p, shell_escape=f)
-// block absolute-path / parent / dotfile reads and writes — belt for
-// the raw_tex disablement in buildPandocArgs.
-func buildPandocEnv(templateDir string) (env []string) {
-	// Allowlist of parent-process env vars pandoc/xelatex genuinely need.
-	// Anything outside this set — most importantly app secrets like
-	// ANTHROPIC_API_KEY, GRAFANA_API_KEY, SLACK_BOT_TOKEN, SLACK_APP_TOKEN
-	// — is deliberately not forwarded.
-	safe := []string{
-		"PATH",
-		"HOME",
-		"LANG",
-		"LC_ALL",
-		"TZ",
-		"TMPDIR",
-		"FONTCONFIG_PATH",
-		"TEXMFVAR",
-		"TEXMFHOME",
-	}
-	env = make([]string, 0, len(safe)+4)
-	for _, k := range safe {
-		v, ok := os.LookupEnv(k)
-		if !ok {
-			continue
-		}
-		env = append(env, k+"="+v)
-	}
-	env = append(env,
-		"TEXINPUTS=.:"+templateDir+"//:",
-		"openin_any=p",
-		"openout_any=p",
-		"shell_escape=f",
-	)
-	return env
-}
-
-// executeGeneratePDF generates a PDF from Markdown content using pandoc.
-//
-//nolint:funlen // Single logical unit: validate, prepare, execute pandoc, handle result
+// executeGeneratePDF renders Markdown content to a PDF in /tmp using a pure-Go
+// pipeline (see renderMarkdownPDF). The bot's PDF scanner picks it up and
+// uploads it to Slack.
 func (s *Server) executeGeneratePDF(ctx context.Context, args map[string]interface{}) (result string, err error) {
 	markdownContent, _ := args["markdown_content"].(string)
 	filename, _ := args["filename"].(string)
@@ -1327,87 +1057,33 @@ func (s *Server) executeGeneratePDF(ctx context.Context, args map[string]interfa
 		return result, err
 	}
 
-	// Ensure .pdf extension
+	// Ensure .pdf extension and strip any directory components so the model
+	// cannot direct the write outside /tmp via the filename.
 	if !strings.HasSuffix(filename, ".pdf") {
 		filename += ".pdf"
 	}
-
-	// Create output path in /tmp
+	filename = filepath.Base(filename)
 	outputPath := filepath.Join("/tmp", filename)
 
-	// Write Markdown to temporary file
-	tmpMD, mdErr := os.CreateTemp("/tmp", "report-*.md")
-	if mdErr != nil {
-		err = fmt.Errorf("creating temp Markdown file: %w", mdErr)
-		return result, err
-	}
-	defer os.Remove(tmpMD.Name())
+	var data []byte
 
-	_, writeErr := tmpMD.WriteString(markdownContent)
-	if writeErr != nil {
-		err = fmt.Errorf("writing Markdown content: %w", writeErr)
-		return result, err
-	}
-	tmpMD.Close()
-
-	// Resolve and validate PDF engine and template
-	pdfEngine := getPDFEngine()
-	err = validatePDFEngine(pdfEngine)
+	data, err = renderMarkdownPDF(ctx, markdownContent, title, s.companyName)
 	if err != nil {
 		return result, err
 	}
 
-	pdfTemplate := getPDFTemplate()
-	err = validatePDFTemplate(pdfTemplate)
+	err = os.WriteFile(outputPath, data, 0o600)
 	if err != nil {
-		return result, err
-	}
-
-	// Convert Markdown to PDF using pandoc
-	cmdArgs := buildPandocArgs(outputPath, pdfEngine, pdfTemplate, title, s.companyName, tmpMD.Name())
-
-	cmd := exec.CommandContext(ctx, "pandoc", cmdArgs...)
-
-	// Run pandoc/xelatex under a minimal env so the renderer cannot see
-	// app secrets (ANTHROPIC_API_KEY, GRAFANA_API_KEY, SLACK_*, etc.),
-	// even if a file-read primitive ever slips past Layer 1.
-	templateDir := filepath.Dir(pdfTemplate)
-	cmd.Env = buildPandocEnv(templateDir)
-	cmd.Dir = "/tmp" // Run from /tmp where output file is written
-
-	var stderr bytes.Buffer
-	var stdout bytes.Buffer
-	cmd.Stderr = &stderr
-	cmd.Stdout = &stdout
-
-	s.logger.InfoContext(ctx, "executing pandoc",
-		slog.String("engine", pdfEngine),
-		slog.String("template", pdfTemplate),
-		slog.String("company_name", s.companyName))
-
-	execErr := cmd.Run()
-	if execErr != nil {
-		s.logger.ErrorContext(ctx, "pandoc execution failed",
-			slog.String("error", execErr.Error()),
-			slog.String("stderr", stderr.String()),
-			slog.String("stdout", stdout.String()))
-		err = fmt.Errorf("running pandoc: %w\nstderr: %s", execErr, stderr.String())
-		return result, err
-	}
-
-	// Verify PDF was created
-	stat, statErr := os.Stat(outputPath)
-	if statErr != nil {
-		err = fmt.Errorf("PDF not created: %w", statErr)
+		err = fmt.Errorf("writing PDF: %w", err)
 		return result, err
 	}
 
 	s.logger.InfoContext(ctx, "PDF generated successfully",
 		slog.String("path", outputPath),
-		slog.Int64("size_bytes", stat.Size()),
+		slog.Int("size_bytes", len(data)),
 		slog.String("filename", filename))
 
-	result = fmt.Sprintf("PDF generated successfully at %s (%.2f KB). The bot will automatically scan /tmp and upload this file to Slack.", outputPath, float64(stat.Size())/1024.0)
+	result = fmt.Sprintf("PDF generated successfully at %s (%.2f KB). The bot will automatically scan /tmp and upload this file to Slack.", outputPath, float64(len(data))/1024.0)
 	return result, err
 }
 
@@ -1603,21 +1279,6 @@ func (s *Server) executeDatabaseList(_ context.Context, _ map[string]interface{}
 
 	result = string(resultBytes)
 	return result, err
-}
-
-// sendError sends an error response.
-func (s *Server) sendError(id interface{}, message string) {
-	response := MCPResponse{
-		JSONRPC: "2.0",
-		ID:      id,
-		Error: &MCPError{
-			Code:    -32603,
-			Message: message,
-		},
-	}
-
-	data, _ := json.Marshal(response)
-	fmt.Println(string(data))
 }
 
 // executeGrafanaListDashboards lists all Grafana dashboards.

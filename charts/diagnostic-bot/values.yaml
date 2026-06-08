@@ -15,6 +15,12 @@ serviceAccount:
   name: ""
   annotations: {}
 
+# Read-only ClusterRole/Binding for the in-cluster Kubernetes tools. Grants
+# get/list/watch on diagnostic resources only — never secrets, never any write
+# verb. Disable if you manage RBAC yourself, or if the bot has no k8s tools.
+rbac:
+  create: true
+
 # Port the bot serves /metrics and health probes on (admin port, never the
 # client-facing MCP port).
 metricsPort: 9090

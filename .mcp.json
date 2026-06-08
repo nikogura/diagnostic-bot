@@ -1,8 +1,0 @@
-{
-  "mcpServers": {
-    "diagnostic": {
-      "url": "http://localhost:8090/sse",
-      "transport": "sse"
-    }
-  }
-}

@@ -1,6 +1,7 @@
-# Build stage - pin to host arch for native compilation.
-# Go cross-compiles natively via GOOS/GOARCH — no QEMU needed.
-FROM --platform=$BUILDPLATFORM golang:1.25-alpine AS builder
+# Build stage - Debian bookworm, matching the distroless-debian12 runtime base
+# (build on the same platform we run on). Go cross-compiles natively via
+# GOOS/GOARCH — no QEMU needed.
+FROM --platform=$BUILDPLATFORM golang:1.25-bookworm AS builder
 
 # TARGETOS / TARGETARCH are supplied automatically by `docker buildx build`
 # when invoked with --platform. We deliberately declare them WITHOUT defaults
@@ -10,8 +11,9 @@ FROM --platform=$BUILDPLATFORM golang:1.25-alpine AS builder
 ARG TARGETOS
 ARG TARGETARCH
 
-# Install build dependencies
-RUN apk add --no-cache git make
+# VERSION is stamped into the binary's telemetry via ldflags. CI passes the
+# computed semver; a bare `docker build` defaults to "dev".
+ARG VERSION=dev
 
 # Set working directory
 WORKDIR /build
@@ -25,79 +27,25 @@ RUN go mod download
 # Copy source code
 COPY . .
 
-# Build the binaries
-RUN CGO_ENABLED=0 GOOS=$TARGETOS GOARCH=$TARGETARCH go build -o /bin/diagnostic-bot ./cmd/bot
-RUN CGO_ENABLED=0 GOOS=$TARGETOS GOARCH=$TARGETARCH go build -o /bin/mcp-server ./cmd/mcp-server
+# Build the binary, stamping the version into the telemetry service.version.
+RUN CGO_ENABLED=0 GOOS=$TARGETOS GOARCH=$TARGETARCH \
+    go build -ldflags="-X main.serviceVersion=${VERSION}" -o /bin/diagnostic-bot ./cmd/bot
 
-# Final stage
-FROM alpine:3.19
+# Final stage — distroless static. The bot is a pure-Go static binary with no
+# external-binary dependencies (whois and PDF rendering are both in-process), so
+# the runtime image carries only the binary plus CA certs and tzdata. No shell,
+# no package manager, runs as the distroless nonroot user (UID 65532).
+FROM gcr.io/distroless/static-debian12:nonroot
 
-# Install runtime dependencies including LaTeX, Pandoc, and Claude Code
-RUN apk add --no-cache \
-    ca-certificates \
-    tzdata \
-    ttf-dejavu \
-    ttf-liberation \
-    fontconfig \
-    texlive \
-    texlive-luatex \
-    texlive-xetex \
-    texmf-dist-latexextra \
-    texmf-dist-fontsextra \
-    pandoc \
-    make \
-    nodejs \
-    npm \
-    wget \
-    aws-cli
-
-# Install Claude Code globally (installs as 'claude' in /usr/local/bin/)
-RUN npm install -g @anthropic-ai/claude-code
-
-# Create non-root user with home directory
-RUN addgroup -g 1000 bot && \
-    adduser -D -u 1000 -G bot bot && \
-    mkdir -p /home/bot/.claude && \
-    chown -R bot:bot /home/bot
-
-# Set working directory
 WORKDIR /app
 
-# Copy binaries from builder
+# Copy the static binary.
 COPY --from=builder /bin/diagnostic-bot /app/diagnostic-bot
-COPY --from=builder /bin/mcp-server /app/mcp-server
 
-# Investigation templates are mounted from Vault secrets at runtime
+# Investigation skills are mounted at runtime.
+ENV INVESTIGATION_DIR=/app/investigations
 
-# Copy engineering standards
-COPY --chown=bot:bot CLAUDE.md /app/docs/CLAUDE.md
-
-# Copy MCP configuration
-COPY --chown=bot:bot .mcp.json /app/.mcp.json
-
-# Copy LaTeX templates (not in reports/ - that's for generated PDFs)
-COPY --chown=bot:bot latex-templates/ /app/latex-templates/
-
-# Copy entrypoint script
-COPY --chown=root:root entrypoint.sh /app/entrypoint.sh
-RUN chmod +x /app/entrypoint.sh
-
-# Create tmp directory for Claude Code prompt files
-RUN mkdir -p /tmp && chown bot:bot /tmp
-
-# Switch to non-root user
-USER bot
-
-# Expose no ports (Socket Mode doesn't need inbound connections)
-
-# Set default environment variables
-ENV INVESTIGATION_DIR=/app/investigations \
-    CLAUDE_MD_PATH=/app/docs/CLAUDE.md \
-    PATH=/usr/local/bin:/usr/bin:/bin
-
-# Health check (check if process is running)
-HEALTHCHECK --interval=30s --timeout=3s --start-period=5s --retries=3 \
-    CMD pgrep -f diagnostic-bot || exit 1
-
-# Run the bot via entrypoint script
-ENTRYPOINT ["/app/entrypoint.sh"]
+# Socket Mode is outbound-only; no inbound ports. Health is the /healthz and
+# /readyz endpoints on the metrics port — a shell-based HEALTHCHECK is neither
+# possible nor needed on distroless.
+ENTRYPOINT ["/app/diagnostic-bot"]

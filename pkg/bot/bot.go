@@ -40,6 +40,7 @@ type Bot struct {
 	logger        *slog.Logger
 	botUserID     string
 	fileRetention time.Duration
+	pdfDisabled   bool
 
 	// Health tracking
 	healthMu        sync.RWMutex
@@ -56,6 +57,7 @@ type Config struct {
 	FileRetention    time.Duration // How long to keep generated files (0 = use default)
 	GitHubToken      string        // GitHub personal access token for repository access
 	ClaudeModel      string        // Claude model to use (e.g., "claude-sonnet-4-5-20250929")
+	PDFDisabled      bool          // Globally disable PDF report generation
 }
 
 // NewBot creates a new diagnostic bot. The toolServer is the single in-process
@@ -118,6 +120,7 @@ func NewBot(cfg Config, toolServer ToolDispatcher, logger *slog.Logger) (result 
 		logger:        logger,
 		botUserID:     authResp.UserID,
 		fileRetention: fileRetention,
+		pdfDisabled:   cfg.PDFDisabled,
 	}
 
 	return result, err
@@ -238,8 +241,9 @@ func (b *Bot) cleanupLoop(ctx context.Context) {
 }
 
 // cleanupOldFiles removes PDF and markdown files older than fileRetention.
+// Generated reports live in /tmp.
 func (b *Bot) cleanupOldFiles(ctx context.Context) (result int) {
-	searchDirs := []string{"/tmp", "/app/reports", "/app", "/home/bot"}
+	searchDirs := []string{"/tmp"}
 	patterns := []string{"*.pdf", "*.md"}
 	cutoff := time.Now().Add(-b.fileRetention)
 

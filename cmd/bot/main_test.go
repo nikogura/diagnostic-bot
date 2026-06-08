@@ -93,14 +93,12 @@ func TestMaybeWrapOIDCAuthPassesThroughWhenIssuerUnset(t *testing.T) {
 	original := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusTeapot)
 	})
-	mcpH, sseH, err := buildOIDCHandlers(context.Background(), original, original, logger)
+	mcpH, err := buildOIDCHandlers(context.Background(), original, logger)
 	require.NoError(t, err)
 
-	for _, h := range []http.Handler{mcpH, sseH} {
-		rec := httptest.NewRecorder()
-		h.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/mcp", nil))
-		require.Equal(t, http.StatusTeapot, rec.Code, "no OIDC config → original handler must run unwrapped")
-	}
+	rec := httptest.NewRecorder()
+	mcpH.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/mcp", nil))
+	require.Equal(t, http.StatusTeapot, rec.Code, "no OIDC config → original handler must run unwrapped")
 }
 
 // TestMaybeWrapOIDCAuthErrorsWhenAudienceMissing verifies the spec's
@@ -113,7 +111,7 @@ func TestMaybeWrapOIDCAuthErrorsWhenAudienceMissing(t *testing.T) {
 	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError}))
 
 	noop := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {})
-	_, _, err := buildOIDCHandlers(context.Background(), noop, noop, logger)
+	_, err := buildOIDCHandlers(context.Background(), noop, logger)
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "MCP_OIDC_AUDIENCE")
 }
@@ -128,7 +126,7 @@ func TestMaybeWrapOIDCAuthErrorsWhenPublicURLMissing(t *testing.T) {
 	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError}))
 
 	noop := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {})
-	_, _, err := buildOIDCHandlers(context.Background(), noop, noop, logger)
+	_, err := buildOIDCHandlers(context.Background(), noop, logger)
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "MCP_PUBLIC_URL")
 }
@@ -148,16 +146,14 @@ func TestMaybeWrapOIDCAuthWrapsWhenFullyConfigured(t *testing.T) {
 	teapot := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusTeapot)
 	})
-	mcpH, sseH, err := buildOIDCHandlers(context.Background(), teapot, teapot, logger)
+	mcpH, err := buildOIDCHandlers(context.Background(), teapot, logger)
 	require.NoError(t, err)
 
-	for _, h := range []http.Handler{mcpH, sseH} {
-		rec := httptest.NewRecorder()
-		h.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/mcp", nil))
-		require.Equal(t, http.StatusUnauthorized, rec.Code, "missing token must be rejected before downstream")
-		require.Contains(t, rec.Header().Get("WWW-Authenticate"), "Bearer")
-		require.Contains(t, rec.Header().Get("WWW-Authenticate"), "https://bot.example.com/.well-known/oauth-protected-resource")
-	}
+	rec := httptest.NewRecorder()
+	mcpH.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/mcp", nil))
+	require.Equal(t, http.StatusUnauthorized, rec.Code, "missing token must be rejected before downstream")
+	require.Contains(t, rec.Header().Get("WWW-Authenticate"), "Bearer")
+	require.Contains(t, rec.Header().Get("WWW-Authenticate"), "https://bot.example.com/.well-known/oauth-protected-resource")
 }
 
 // TestProtectedResourceMetadataAdvertisesOIDCWhenActive verifies the

@@ -18,6 +18,7 @@ type ToolConfig struct {
 	GitHubAvailable     bool
 	DatabaseAvailable   bool
 	ECRAvailable        bool
+	K8sAvailable        bool
 	ReadOnly            bool
 	APIToolRegistry     *apiconfig.APIToolRegistry
 }
@@ -33,6 +34,7 @@ func NewToolConfig() (config ToolConfig) {
 		GitHubAvailable:     os.Getenv("GITHUB_TOKEN") != "",
 		DatabaseAvailable:   hasDatabaseConfig(),
 		ECRAvailable:        os.Getenv("AWS_REGION") != "" || os.Getenv("AWS_DEFAULT_REGION") != "",
+		K8sAvailable:        hasK8sConfig(),
 		ReadOnly:            mcp.ReadOnlyEnabled(),
 	}
 
@@ -62,6 +64,10 @@ func (tc ToolConfig) WriteToolUsage(builder *strings.Builder) {
 
 	if tc.DatabaseAvailable {
 		writeDatabaseToolUsage(builder)
+	}
+
+	if tc.K8sAvailable {
+		writeK8sToolUsage(builder)
 	}
 
 	if tc.GitHubAvailable {
@@ -179,6 +185,25 @@ func writeDatabaseToolUsage(builder *strings.Builder) {
 	builder.WriteString("**Database:**\n")
 	builder.WriteString("- `database_query`: Execute read-only SQL queries (SELECT, SHOW, DESCRIBE, EXPLAIN)\n")
 	builder.WriteString("- `database_list`: List available databases\n\n")
+}
+
+// hasK8sConfig reports whether Kubernetes tools should be advertised: the bot is
+// running in a cluster or a KUBECONFIG is set, and k8s access is not disabled.
+func hasK8sConfig() (available bool) {
+	if strings.EqualFold(os.Getenv("K8S_ENABLED"), "false") {
+		return available
+	}
+
+	available = os.Getenv("KUBERNETES_SERVICE_HOST") != "" || os.Getenv("KUBECONFIG") != ""
+	return available
+}
+
+func writeK8sToolUsage(builder *strings.Builder) {
+	builder.WriteString("**Kubernetes (read-only, the bot's own cluster):**\n")
+	builder.WriteString("- `k8s_get_resource`: Read a configmap, deployment, service, pod, or Flux/Atlas CRD. Secrets cannot be read.\n")
+	builder.WriteString("- `k8s_pod_logs`: Fetch pod logs by pod name or label selector\n")
+	builder.WriteString("- `k8s_list_pods`: List pods with status and restart counts\n")
+	builder.WriteString("- `k8s_get_events`: List Kubernetes events\n\n")
 }
 
 func writeGitHubToolUsage(builder *strings.Builder) {

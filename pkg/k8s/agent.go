@@ -2,12 +2,10 @@ package k8s
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"log/slog"
-	"os/exec"
 	"strings"
 	"time"
 
@@ -30,9 +28,10 @@ const (
 	DefaultTailLines = 100
 )
 
-// Agent provides Kubernetes cluster access for investigations.
+// Agent provides read-only Kubernetes cluster access for investigations. It
+// exposes no write verbs and no path to Secrets (see GetResource).
 type Agent struct {
-	clientset     *kubernetes.Clientset
+	clientset     kubernetes.Interface
 	dynamicClient dynamic.Interface
 	logger        *slog.Logger
 	sanitizer     *Sanitizer
@@ -212,7 +211,10 @@ func (a *Agent) FetchLogs(ctx context.Context, req LogRequest) (result string, e
 	return result, err
 }
 
-// GetResource retrieves a Kubernetes resource configuration.
+// GetResource retrieves a Kubernetes resource configuration. Only a fixed
+// allowlist of resource types is readable; Secrets are explicitly excluded and
+// there is no generic "get any resource" path. Returned output is run through
+// the secret/PII sanitizer before it leaves.
 func (a *Agent) GetResource(ctx context.Context, resourceType string, namespace string, name string, outputFormat string) (result string, err error) {
 	a.logger.InfoContext(ctx, "getting Kubernetes resource",
 		slog.String("type", resourceType),
@@ -250,8 +252,15 @@ func (a *Agent) GetResource(ctx context.Context, resourceType string, namespace 
 		gvr := schema.GroupVersionResource{Group: "db.atlasgo.io", Version: "v1alpha1", Resource: "atlasmigrations"}
 		resource, err = a.dynamicClient.Resource(gvr).Namespace(namespace).Get(ctx, name, metav1.GetOptions{})
 
+	case "secret", "secrets":
+		// Secrets are never readable through this tool, by design. This explicit
+		// deny is belt-and-suspenders on top of the allowlist below and the RBAC
+		// that withholds the secrets verb.
+		err = errors.New("reading Kubernetes Secrets is not permitted")
+		return result, err
+
 	default:
-		err = fmt.Errorf("unsupported resource type: %s", resourceType)
+		err = fmt.Errorf("unsupported or non-allowlisted resource type: %s", resourceType)
 		return result, err
 	}
 
@@ -385,56 +394,4 @@ func (a *Agent) grepLogs(logs string, pattern string) (result string) {
 
 	result = strings.Join(filtered, "\n")
 	return result
-}
-
-// WhoisLookup performs a whois lookup on an IP address.
-func (a *Agent) WhoisLookup(ctx context.Context, ipAddress string) (result string, err error) {
-	a.logger.InfoContext(ctx, "performing whois lookup",
-		slog.String("ip", ipAddress))
-
-	// Use ip-api.com for geolocation lookup (free, no auth required)
-	// This provides: country, ISP, ASN, organization
-	url := fmt.Sprintf("http://ip-api.com/json/%s?fields=status,message,country,countryCode,region,regionName,city,isp,org,as,query", ipAddress)
-
-	// Note: Using exec.CommandContext to call curl since we're in a container
-	// and net/http might have issues with DNS
-	cmd := exec.CommandContext(ctx, "wget", "-qO-", url)
-
-	output, execErr := cmd.Output()
-	if execErr != nil {
-		err = fmt.Errorf("executing whois lookup: %w", execErr)
-		return result, err
-	}
-
-	// Parse the JSON response to make it readable
-	var data map[string]interface{}
-
-	err = json.Unmarshal(output, &data)
-	if err != nil {
-		// If JSON parsing fails, return raw output
-		result = string(output)
-		return result, err
-	}
-
-	// Check status
-	status, _ := data["status"].(string)
-	if status != "success" {
-		message, _ := data["message"].(string)
-		result = fmt.Sprintf("Whois lookup failed for %s: %s\n", ipAddress, message)
-		return result, err
-	}
-
-	// Format the results nicely
-	var builder strings.Builder
-
-	fmt.Fprintf(&builder, "Whois lookup for %s:\n\n", ipAddress)
-	fmt.Fprintf(&builder, "Country: %s (%s)\n", data["country"], data["countryCode"])
-	fmt.Fprintf(&builder, "Region: %s (%s)\n", data["regionName"], data["region"])
-	fmt.Fprintf(&builder, "City: %s\n", data["city"])
-	fmt.Fprintf(&builder, "ISP: %s\n", data["isp"])
-	fmt.Fprintf(&builder, "Organization: %s\n", data["org"])
-	fmt.Fprintf(&builder, "ASN: %s\n", data["as"])
-
-	result = builder.String()
-	return result, err
 }

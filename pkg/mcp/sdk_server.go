@@ -11,7 +11,7 @@ import (
 )
 
 // SDKServer wraps the existing Server with the official MCP SDK.
-// It provides both stdio and Streamable HTTP transports.
+// It provides the Streamable HTTP transport.
 type SDKServer struct {
 	mcpServer *sdkmcp.Server
 	legacy    *Server
@@ -37,25 +37,9 @@ func NewSDKServer(legacy *Server) (result *SDKServer) {
 	return result
 }
 
-// RunStdio starts the server using stdio transport.
-func (s *SDKServer) RunStdio(ctx context.Context) (err error) {
-	s.logger.InfoContext(ctx, "MCP server started", slog.String("transport", "stdio"))
-
-	err = s.mcpServer.Run(ctx, &sdkmcp.StdioTransport{})
-
-	return err
-}
-
 // StreamableHTTPHandler returns an http.Handler for the Streamable HTTP transport.
 func (s *SDKServer) StreamableHTTPHandler() (handler http.Handler) {
 	handler = sdkmcp.NewStreamableHTTPHandler(s.getServer, nil)
-
-	return handler
-}
-
-// SSEHandler returns an http.Handler for the legacy SSE transport.
-func (s *SDKServer) SSEHandler() (handler http.Handler) {
-	handler = sdkmcp.NewSSEHandler(s.getServer, nil)
 
 	return handler
 }
@@ -108,6 +92,7 @@ func (s *SDKServer) registerTools() {
 	s.registerGitHubTools()
 	s.registerECRTools()
 	s.registerDatabaseTools()
+	s.registerK8sTools()
 	s.registerGrafanaTools()
 	s.registerCloudWatchTools()
 	s.registerPrometheusTools()
@@ -168,6 +153,25 @@ func (s *SDKServer) registerECRTools() {
 
 	for _, t := range getECRTools() {
 		s.registerTool(t.Name, t.Description, t.InputSchema, s.legacy.executeECRScanResults)
+	}
+}
+
+func (s *SDKServer) registerK8sTools() {
+	if len(s.legacy.k8sClusters) == 0 {
+		return
+	}
+
+	handlers := map[string]func(context.Context, map[string]interface{}) (string, error){
+		toolK8sGetResource: s.legacy.executeK8sGetResource,
+		toolK8sPodLogs:     s.legacy.executeK8sPodLogs,
+		toolK8sListPods:    s.legacy.executeK8sListPods,
+		toolK8sGetEvents:   s.legacy.executeK8sGetEvents,
+	}
+
+	for _, t := range getK8sTools() {
+		if h, ok := handlers[t.Name]; ok {
+			s.registerTool(t.Name, t.Description, t.InputSchema, h)
+		}
 	}
 }
 

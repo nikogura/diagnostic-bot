@@ -100,7 +100,7 @@ func TestWithAuthInjectsResultIntoContext(t *testing.T) {
 }
 
 // TestResultFromContextReturnsNilWhenAbsent verifies the getter is safe
-// to call on un-wrapped contexts (the slackbot stdio path doesn't go
+// to call on un-wrapped contexts (the in-process Slack-bot path doesn't go
 // through WithAuth and must not crash when audit code asks for a Result).
 func TestResultFromContextReturnsNilWhenAbsent(t *testing.T) {
 	t.Parallel()

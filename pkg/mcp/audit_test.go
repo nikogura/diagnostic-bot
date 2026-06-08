@@ -103,13 +103,13 @@ func TestAuditSourceMiddlewareInjectsIPIntoContext(t *testing.T) {
 	assert.Equal(t, "10.0.1.5", captured)
 }
 
-// TestAuditSourceFromContextDefaultsToStdio verifies the local Slack-bot
-// path: when no IP has been injected (stdio transport, no HTTP request),
-// the audit source is the literal string "stdio" so audit logs are
-// uniform across transports rather than carrying empty fields.
-func TestAuditSourceFromContextDefaultsToStdio(t *testing.T) {
+// TestAuditSourceFromContextDefaultsToLocal verifies the in-process Slack-bot
+// path: when no IP has been injected (no HTTP request), the audit source is the
+// literal string "local" so audit logs are uniform rather than carrying empty
+// fields.
+func TestAuditSourceFromContextDefaultsToLocal(t *testing.T) {
 	t.Parallel()
-	assert.Equal(t, "stdio", auditSourceFromContext(context.Background()))
+	assert.Equal(t, "local", auditSourceFromContext(context.Background()))
 }
 
 // TestAuditSourceFromContextHonorsInjectedValue verifies the bot path
@@ -137,7 +137,7 @@ func TestAuditUserFromContextPrefersAuthResultEmail(t *testing.T) {
 	botCtx := WithAuditUser(context.Background(), "slack-user-bob")
 	require.Equal(t, "slack-user-bob", server.auditUserFromContext(botCtx))
 
-	// HTTP/SSE path: verified auth result beats both.
+	// HTTP path: verified auth result beats both.
 	authCtx := context.WithValue(context.Background(), authResultCtxKeyForTest{}, &auth.Result{Authenticated: true, Email: "alice@katn-solutions.io", Method: "google-oauth"})
 	_ = authCtx // marker for the comment block; the next line uses the real context value via auth.WithAuth at runtime
 	verified := injectAuthResult(context.Background(), &auth.Result{Authenticated: true, Email: "alice@katn-solutions.io", Method: "google-oauth"})

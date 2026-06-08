@@ -112,7 +112,7 @@ func TestRunInvestigationReturnsFinalAnswerWithNoTools(t *testing.T) {
 
 	runner := newTestRunner(model, tools)
 
-	result, err := runner.RunInvestigation(context.Background(), testSkill(), "what happened?")
+	result, err := runner.RunInvestigation(context.Background(), testSkill(), "what happened?", true)
 
 	require.NoError(t, err)
 	assert.Equal(t, "Final answer.", result)
@@ -131,7 +131,7 @@ func TestRunInvestigationDispatchesToolThenAnswers(t *testing.T) {
 
 	runner := newTestRunner(model, tools)
 
-	result, err := runner.RunInvestigation(context.Background(), testSkill(), "check logs")
+	result, err := runner.RunInvestigation(context.Background(), testSkill(), "check logs", true)
 
 	require.NoError(t, err)
 	assert.Equal(t, "Done after tool.", result)
@@ -154,7 +154,7 @@ func TestRunInvestigationFiltersToolOutputBeforeModelSeesIt(t *testing.T) {
 
 	runner := newTestRunner(model, tools)
 
-	_, err := runner.RunInvestigation(context.Background(), testSkill(), "check")
+	_, err := runner.RunInvestigation(context.Background(), testSkill(), "check", true)
 	require.NoError(t, err)
 	require.Len(t, model.calls, 2)
 
@@ -180,7 +180,7 @@ func TestRunInvestigationStopsAtMaxIterations(t *testing.T) {
 
 	runner := newTestRunner(model, tools)
 
-	_, err := runner.RunInvestigation(context.Background(), testSkill(), "loop")
+	_, err := runner.RunInvestigation(context.Background(), testSkill(), "loop", true)
 
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "exceeded")
@@ -199,7 +199,7 @@ func TestRunInvestigationPropagatesModelError(t *testing.T) {
 
 	runner := newTestRunner(model, &fakeDispatcher{})
 
-	_, err := runner.RunInvestigation(context.Background(), testSkill(), "x")
+	_, err := runner.RunInvestigation(context.Background(), testSkill(), "x", true)
 
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "api down")
@@ -216,7 +216,7 @@ func TestRunInvestigationReportsToolErrorToModelAndContinues(t *testing.T) {
 
 	runner := newTestRunner(model, tools)
 
-	result, err := runner.RunInvestigation(context.Background(), testSkill(), "q")
+	result, err := runner.RunInvestigation(context.Background(), testSkill(), "q", true)
 
 	require.NoError(t, err, "a tool error is reported to the model, not fatal to the run")
 	assert.Equal(t, "handled the error", result)
@@ -241,6 +241,66 @@ func TestConvertToolDefinitions(t *testing.T) {
 	assert.NotNil(t, out[0].InputSchema)
 }
 
+func TestFilterPDFTool(t *testing.T) {
+	t.Parallel()
+
+	tools := []mcp.MCPTool{
+		{Name: "query_loki"},
+		{Name: "generate_pdf"},
+		{Name: "whois_lookup"},
+	}
+
+	kept := filterPDFTool(tools, true)
+	if len(kept) != 3 {
+		t.Errorf("pdfEnabled=true should keep all tools, got %d", len(kept))
+	}
+
+	filtered := filterPDFTool(tools, false)
+	for _, tool := range filtered {
+		if tool.Name == "generate_pdf" {
+			t.Error("pdfEnabled=false must drop generate_pdf")
+		}
+	}
+
+	if len(filtered) != 2 {
+		t.Errorf("expected 2 tools after dropping generate_pdf, got %d", len(filtered))
+	}
+}
+
+func TestRunInvestigationWithoutPDFWithholdsTool(t *testing.T) {
+	t.Parallel()
+
+	model := &fakeModel{script: []func() (claude.MessageResponse, error){
+		textResponse("text-only answer"),
+	}}
+	tools := &fakeDispatcher{defs: []mcp.MCPTool{{Name: "query_loki"}, {Name: "generate_pdf"}}}
+
+	runner := newTestRunner(model, tools)
+
+	_, err := runner.RunInvestigation(context.Background(), testSkill(), "check", false)
+	require.NoError(t, err)
+	require.Len(t, model.calls, 1)
+
+	for _, tool := range model.calls[0].Tools {
+		if tool.Name == "generate_pdf" {
+			t.Error("generate_pdf must not be passed to the model when pdfEnabled=false")
+		}
+	}
+}
+
+func TestBuildSystemPromptTextOnlyWhenPDFDisabled(t *testing.T) {
+	t.Parallel()
+
+	runner := &InvestigationRunner{toolUsage: ToolConfig{}, logger: testLogger()}
+
+	enabled := runner.buildSystemPrompt(testSkill(), true)
+	assert.Contains(t, enabled, "ALWAYS generate a PDF")
+
+	disabled := runner.buildSystemPrompt(testSkill(), false)
+	assert.NotContains(t, disabled, "ALWAYS generate a PDF")
+	assert.Contains(t, disabled, "Do NOT generate a PDF")
+}
+
 func TestBuildSystemPromptGatesToolsByConfig(t *testing.T) {
 	t.Parallel()
 
@@ -249,7 +309,7 @@ func TestBuildSystemPromptGatesToolsByConfig(t *testing.T) {
 		logger:    testLogger(),
 	}
 
-	prompt := runner.buildSystemPrompt(testSkill())
+	prompt := runner.buildSystemPrompt(testSkill(), true)
 
 	assert.Contains(t, prompt, "# Investigation Task")
 	assert.Contains(t, prompt, "Investigate the issue.")

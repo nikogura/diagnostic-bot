@@ -30,11 +30,10 @@ distro-test:
 	@echo "Rendering Helm chart..."
 	helm template diagnostic-bot charts/diagnostic-bot > /dev/null
 
-# Build compiles both binaries
+# Build compiles the bot binary
 build:
 	mkdir -p bin
 	go build -o bin/diagnostic-bot ./cmd/bot
-	go build -o bin/mcp-server ./cmd/mcp-server
 
 # Clean removes build artifacts
 clean:

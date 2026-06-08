@@ -23,14 +23,20 @@ import (
 	"github.com/nikogura/diagnostic-bot/pkg/observability"
 )
 
-// serviceName and serviceVersion identify this service in telemetry.
+// serviceName identifies this service in telemetry; otelScope is the
+// instrumentation scope for its instruments.
 const (
-	serviceName    = "diagnostic-bot"
-	serviceVersion = "0.2.0"
-
-	// otelScope is the instrumentation scope for this service's instruments.
-	otelScope = "github.com/nikogura/diagnostic-bot"
+	serviceName = "diagnostic-bot"
+	otelScope   = "github.com/nikogura/diagnostic-bot"
 )
+
+// serviceVersion is stamped into telemetry (the service.version resource
+// attribute). It is set at build time via
+// -ldflags "-X main.serviceVersion=<version>" (see the Dockerfile and CI);
+// "dev" is the default for local builds.
+//
+//nolint:gochecknoglobals // build-time injected version string
+var serviceVersion = "dev"
 
 func main() {
 	// Structured JSON logs, decorated with trace/span IDs when a span is active
@@ -51,6 +57,7 @@ func main() {
 		FileRetention:    parseFileRetention(logger),
 		GitHubToken:      getEnv("GITHUB_TOKEN", ""),
 		ClaudeModel:      getEnv("CLAUDE_MODEL", "claude-sonnet-4-5-20250929"),
+		PDFDisabled:      isTruthy(getEnv("PDF_DISABLED", "")),
 	}
 
 	// Validate required configuration
@@ -171,6 +178,16 @@ func initObservability(ctx context.Context, logger *slog.Logger) (obs *observabi
 	return obs
 }
 
+// isTruthy reports whether a string is an affirmative flag value.
+func isTruthy(value string) (truthy bool) {
+	switch strings.ToLower(strings.TrimSpace(value)) {
+	case "1", "true", "yes", "on":
+		truthy = true
+	}
+
+	return truthy
+}
+
 // getEnv retrieves an environment variable with a default value.
 func getEnv(key string, defaultValue string) (result string) {
 	value := os.Getenv(key)
@@ -284,13 +301,12 @@ func startMCPHTTPServer(ctx context.Context, toolServer *mcp.Server, logger *slo
 	sdkServer := mcp.NewSDKServer(toolServer)
 
 	mcpHandler := mcp.WithAuditSourceMiddleware(sdkServer.StreamableHTTPHandler())
-	sseHandler := mcp.WithAuditSourceMiddleware(sdkServer.SSEHandler())
 
 	// Auth dispatch: exactly one of MCP_OIDC_ISSUER or GOOGLE_OAUTH_CLIENT_ID
-	// may be set. Either path wraps /mcp + /sse with auth.WithAuth (401 +
+	// may be set. Either path wraps /mcp with auth.WithAuth (401 +
 	// WWW-Authenticate triggers Claude Code's browser-pop OAuth flow);
-	// neither set leaves the handlers unwrapped. Slack-bot stdio path is
-	// untouched — it never hits this listener.
+	// neither set leaves the handler unwrapped. The in-process Slack-bot path
+	// is untouched — it never hits this listener.
 	provider, providerErr := selectAuthProvider(getEnv("MCP_OIDC_ISSUER", ""), getEnv("GOOGLE_OAUTH_CLIENT_ID", ""))
 	if providerErr != nil {
 		logger.ErrorContext(ctx, providerErr.Error())
@@ -299,21 +315,20 @@ func startMCPHTTPServer(ctx context.Context, toolServer *mcp.Server, logger *slo
 	switch provider {
 	case authProviderOIDC:
 		var oidcErr error
-		mcpHandler, sseHandler, oidcErr = buildOIDCHandlers(ctx, mcpHandler, sseHandler, logger)
+		mcpHandler, oidcErr = buildOIDCHandlers(ctx, mcpHandler, logger)
 		if oidcErr != nil {
 			logger.ErrorContext(ctx, oidcErr.Error())
 			os.Exit(1)
 		}
 	case authProviderGoogle:
-		mcpHandler, sseHandler = maybeWrapGoogleAuth(ctx, mcpHandler, sseHandler, logger)
+		mcpHandler = maybeWrapGoogleAuth(ctx, mcpHandler, logger)
 	case authProviderNone:
-		logger.InfoContext(ctx, "no auth provider configured — MCP HTTP/SSE will run without auth")
+		logger.InfoContext(ctx, "no auth provider configured — MCP HTTP will run without auth")
 	}
 
 	go func() {
 		mux := http.NewServeMux()
 		mux.Handle("/mcp", mcpHandler)
-		mux.Handle("/sse", sseHandler)
 
 		// Protected-resource metadata is served unauthenticated — clients
 		// have to read it BEFORE they have a token.
@@ -321,8 +336,7 @@ func startMCPHTTPServer(ctx context.Context, toolServer *mcp.Server, logger *slo
 
 		logger.InfoContext(ctx, "starting MCP HTTP server",
 			slog.String("addr", mcpHTTPAddr),
-			slog.String("streamable_http", "/mcp"),
-			slog.String("sse", "/sse"))
+			slog.String("streamable_http", "/mcp"))
 
 		httpErr := http.ListenAndServe(mcpHTTPAddr, mux)
 		if httpErr != nil {
@@ -332,15 +346,15 @@ func startMCPHTTPServer(ctx context.Context, toolServer *mcp.Server, logger *slo
 }
 
 // maybeWrapGoogleAuth turns on Google OAuth gating when GOOGLE_OAUTH_CLIENT_ID
-// is set. Without it, the handlers are returned unwrapped — current
+// is set. Without it, the handler is returned unwrapped — current
 // no-auth, VPC-gated behavior is preserved by default.
-func maybeWrapGoogleAuth(ctx context.Context, mcpHandler, sseHandler http.Handler, logger *slog.Logger) (mcp, sse http.Handler) {
-	mcp, sse = mcpHandler, sseHandler
+func maybeWrapGoogleAuth(ctx context.Context, mcpHandler http.Handler, logger *slog.Logger) (wrapped http.Handler) {
+	wrapped = mcpHandler
 
 	clientID := getEnv("GOOGLE_OAUTH_CLIENT_ID", "")
 	if clientID == "" {
-		logger.InfoContext(ctx, "GOOGLE_OAUTH_CLIENT_ID not set — MCP HTTP/SSE will run without auth")
-		return mcp, sse
+		logger.InfoContext(ctx, "GOOGLE_OAUTH_CLIENT_ID not set — MCP HTTP will run without auth")
+		return wrapped
 	}
 
 	publicURL := strings.TrimRight(getEnv("MCP_PUBLIC_URL", ""), "/")
@@ -363,10 +377,9 @@ func maybeWrapGoogleAuth(ctx context.Context, mcpHandler, sseHandler http.Handle
 	}
 
 	resourceMetaURL := publicURL + "/.well-known/oauth-protected-resource"
-	mcp = auth.WithAuth(googleAuth, resourceMetaURL, logger)(mcpHandler)
-	sse = auth.WithAuth(googleAuth, resourceMetaURL, logger)(sseHandler)
+	wrapped = auth.WithAuth(googleAuth, resourceMetaURL, logger)(mcpHandler)
 
-	logger.InfoContext(ctx, "Google OAuth enabled for MCP HTTP/SSE",
+	logger.InfoContext(ctx, "Google OAuth enabled for MCP HTTP",
 		slog.String("client_id", clientID),
 		slog.Any("allowed_hosted_domains", cfg.AllowedHostedDomains),
 		slog.Int("allowed_emails_count", len(cfg.AllowedEmails)),
@@ -376,12 +389,11 @@ func maybeWrapGoogleAuth(ctx context.Context, mcpHandler, sseHandler http.Handle
 		slog.String("emails_file", cfg.AllowedEmailsFile),
 		slog.String("resource_metadata_url", resourceMetaURL),
 	)
-	return mcp, sse
+	return wrapped
 }
 
 // authProvider enumerates the auth backends the MCP HTTP server can wrap
-// /mcp and /sse with. Exactly one may be active at a time; both-set is a
-// startup error.
+// /mcp with. Exactly one may be active at a time; both-set is a startup error.
 type authProvider int
 
 const (
@@ -437,24 +449,24 @@ func oauthMetadataConfig(provider authProvider, oidcIssuer, googleClientID strin
 // buildOIDCHandlers is the OIDC counterpart to maybeWrapGoogleAuth. Pure
 // in the sense that errors are returned rather than os.Exit'd, so the
 // caller (or tests) can decide what to do.
-func buildOIDCHandlers(ctx context.Context, mcpHandler, sseHandler http.Handler, logger *slog.Logger) (mcpOut, sseOut http.Handler, err error) {
-	mcpOut, sseOut = mcpHandler, sseHandler
+func buildOIDCHandlers(ctx context.Context, mcpHandler http.Handler, logger *slog.Logger) (mcpOut http.Handler, err error) {
+	mcpOut = mcpHandler
 
 	issuer := strings.TrimRight(getEnv("MCP_OIDC_ISSUER", ""), "/")
 	if issuer == "" {
-		return mcpOut, sseOut, err
+		return mcpOut, err
 	}
 
 	audience := getEnv("MCP_OIDC_AUDIENCE", "")
 	if audience == "" {
 		err = errors.New("MCP_OIDC_ISSUER set but MCP_OIDC_AUDIENCE is empty — refusing to run without audience binding")
-		return mcpOut, sseOut, err
+		return mcpOut, err
 	}
 
 	publicURL := strings.TrimRight(getEnv("MCP_PUBLIC_URL", ""), "/")
 	if publicURL == "" {
 		err = errors.New("MCP_OIDC_ISSUER set but MCP_PUBLIC_URL is empty — cannot build resource_metadata URL")
-		return mcpOut, sseOut, err
+		return mcpOut, err
 	}
 
 	jwksCacheSeconds := 300
@@ -480,9 +492,8 @@ func buildOIDCHandlers(ctx context.Context, mcpHandler, sseHandler http.Handler,
 
 	resourceMetaURL := publicURL + "/.well-known/oauth-protected-resource"
 	mcpOut = auth.WithAuth(oidcAuth, resourceMetaURL, logger)(mcpHandler)
-	sseOut = auth.WithAuth(oidcAuth, resourceMetaURL, logger)(sseHandler)
 
-	logger.InfoContext(ctx, "OIDC auth enabled for MCP HTTP/SSE",
+	logger.InfoContext(ctx, "OIDC auth enabled for MCP HTTP",
 		slog.String("issuer", issuer),
 		slog.String("audience", audience),
 		slog.Any("allowed_groups", cfg.AllowedGroups),
@@ -497,7 +508,7 @@ func buildOIDCHandlers(ctx context.Context, mcpHandler, sseHandler http.Handler,
 		slog.Int("jwks_cache_seconds", cfg.JWKSCacheTime),
 		slog.String("resource_metadata_url", resourceMetaURL),
 	)
-	return mcpOut, sseOut, err
+	return mcpOut, err
 }
 
 // registerOAuthMetadataRoute serves /.well-known/oauth-protected-resource

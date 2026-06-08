@@ -371,27 +371,15 @@ vault kv put infra/diagnostic-bot-inv-ecr \
 
 ### 5. Testing
 
-Test the ECR integration locally:
+The `ecr_scan_results` tool is exercised through the bot, not a standalone
+process. With AWS credentials and `AWS_REGION` configured:
 
-```bash
-# Export AWS credentials
-export AWS_ACCESS_KEY_ID=...
-export AWS_SECRET_ACCESS_KEY=...
-export AWS_REGION=us-east-1
-
-# Build MCP server
-go build -o bin/mcp-server ./cmd/mcp-server
-
-# Test MCP tool directly
-echo '{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"ecr_scan_results","arguments":{"accounts":["123456789012"],"max_age_days":30}}}' | \
-  ./bin/mcp-server
-```
-
-Test via Claude Code:
-
-```bash
-claude --print -- "Generate an ECR vulnerability report for the last 30 days in production account"
-```
+- **Via Slack** — ask the bot to run an ECR vulnerability investigation
+  (e.g. "Generate an ECR vulnerability report for the last 30 days in the
+  production account").
+- **Via the MCP server** — start the bot with `MCP_HTTP_ENABLED=true`, point an
+  MCP client (such as Claude Code) at the `/mcp` endpoint, and call
+  `ecr_scan_results` with the `accounts` and `max_age_days` arguments.
 
 ## Report Output
 
