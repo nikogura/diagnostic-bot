@@ -1,6 +1,6 @@
 # Build stage - pin to host arch for native compilation.
 # Go cross-compiles natively via GOOS/GOARCH — no QEMU needed.
-FROM --platform=$BUILDPLATFORM golang:1.24-alpine AS builder
+FROM --platform=$BUILDPLATFORM golang:1.25-alpine AS builder
 
 # TARGETOS / TARGETARCH are supplied automatically by `docker buildx build`
 # when invoked with --platform. We deliberately declare them WITHOUT defaults
