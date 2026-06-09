@@ -21,8 +21,9 @@ const sampleReport = `# ModSecurity Block Investigation
 ## Executive Summary
 
 A legitimate API client was blocked by the WAF after a deploy changed the
-request content type. The triggering rule was a false positive against JSON
-payloads. Remediation below.
+request content type — the triggering rule was a false positive against JSON
+payloads. Flow: client → gateway → WAF → upstream. The user asked “why is my
+traffic dropping?” … remediation below.
 
 ## Key Findings
 
@@ -94,6 +95,41 @@ func TestGeneratePDFPreviewArtifact(t *testing.T) {
 
 	abs, _ := filepath.Abs(out)
 	t.Logf("PDF preview written to %s (%d bytes) — open it to review the rendering", abs, len(data))
+}
+
+func TestFoldToASCII(t *testing.T) {
+	t.Parallel()
+
+	cases := map[string]string{
+		"plain ascii":          "plain ascii",
+		"em — dash":            "em -- dash",
+		"arrow → here":         "arrow -> here",
+		"curly “quotes”":       "curly \"quotes\"",
+		"apostrophe’s":         "apostrophe's",
+		"ellipsis…":            "ellipsis...",
+		"entity &quot;x&quot;": "entity \"x\"",
+	}
+
+	for in, want := range cases {
+		got := foldToASCII(in)
+		if got != want {
+			t.Errorf("foldToASCII(%q) = %q, want %q", in, got, want)
+		}
+	}
+}
+
+func TestFoldToASCIIIsPureASCII(t *testing.T) {
+	t.Parallel()
+
+	// Typography that previously mojibaked, plus an accented name and an emoji.
+	in := "Façade — café → “résumé” • 日本語 🚀 …"
+	got := foldToASCII(in)
+
+	for i := range len(got) {
+		if got[i] >= 128 {
+			t.Fatalf("foldToASCII left a non-ASCII byte at %d in %q", i, got)
+		}
+	}
 }
 
 func TestNeutralizeImagesReplacesWithAltText(t *testing.T) {

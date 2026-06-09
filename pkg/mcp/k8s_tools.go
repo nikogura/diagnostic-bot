@@ -14,10 +14,11 @@ import (
 
 // Kubernetes read-only tool names.
 const (
-	toolK8sGetResource = "k8s_get_resource"
-	toolK8sPodLogs     = "k8s_pod_logs"
-	toolK8sListPods    = "k8s_list_pods"
-	toolK8sGetEvents   = "k8s_get_events"
+	toolK8sGetResource   = "k8s_get_resource"
+	toolK8sListResources = "k8s_list_resources"
+	toolK8sPodLogs       = "k8s_pod_logs"
+	toolK8sListPods      = "k8s_list_pods"
+	toolK8sGetEvents     = "k8s_get_events"
 )
 
 // defaultClusterName is the registry key used for the bot's own cluster.
@@ -98,20 +99,38 @@ func getK8sTools() (result []MCPTool) {
 	result = []MCPTool{
 		{
 			Name:        toolK8sGetResource,
-			Description: "Read a Kubernetes resource (read-only). Allowed resource_type values: configmap, deployment, service, pod, gitrepository, kustomization, atlasmigration. Secrets cannot be read. Output is secret-scrubbed.",
+			Description: "Read a single Kubernetes resource by name (read-only). Covers core/apps, Ingress, the Gateway API (gateways, httproutes, grpcroutes, etc.), Envoy Gateway, cert-manager (certificates, certificaterequests, issuers — never the private key), and Flux/Atlas CRDs. Secrets cannot be read. Output is JSON, secret-scrubbed.",
 			InputSchema: map[string]interface{}{
 				"type": "object",
 				"properties": map[string]interface{}{
 					"cluster": clusterProperty(),
 					"resource_type": map[string]interface{}{
 						"type":        "string",
-						"description": "One of: configmap, deployment, service, pod, gitrepository, kustomization, atlasmigration",
-						"enum":        []string{"configmap", "deployment", "service", "pod", "gitrepository", "kustomization", "atlasmigration"},
+						"description": "The resource type to read (see enum). Secrets are not available.",
+						"enum":        k8s.AllowedResourceTypes(),
 					},
-					"namespace": map[string]interface{}{"type": "string", "description": "Resource namespace"},
+					"namespace": map[string]interface{}{"type": "string", "description": "Resource namespace (omit for cluster-scoped types)"},
 					"name":      map[string]interface{}{"type": "string", "description": "Resource name"},
 				},
-				"required": []string{"resource_type", "namespace", "name"},
+				"required": []string{"resource_type", "name"},
+			},
+		},
+		{
+			Name:        toolK8sListResources,
+			Description: "List Kubernetes resources of a type (read-only), returning name, namespace, spec, and status per item. Omit namespace to list across ALL namespaces — use this to diff, e.g., which httproutes attach to which gateway. Same resource types as k8s_get_resource; Secrets cannot be listed.",
+			InputSchema: map[string]interface{}{
+				"type": "object",
+				"properties": map[string]interface{}{
+					"cluster": clusterProperty(),
+					"resource_type": map[string]interface{}{
+						"type":        "string",
+						"description": "The resource type to list (see enum). Secrets are not available.",
+						"enum":        k8s.AllowedResourceTypes(),
+					},
+					"namespace":      map[string]interface{}{"type": "string", "description": "Namespace to list in; omit for all namespaces"},
+					"label_selector": map[string]interface{}{"type": "string", "description": "Optional label selector"},
+				},
+				"required": []string{"resource_type"},
 			},
 		},
 		{
@@ -177,6 +196,23 @@ func (s *Server) executeK8sGetResource(ctx context.Context, args map[string]inte
 		optStringArg(args, "namespace"),
 		optStringArg(args, "name"),
 		"")
+
+	return result, err
+}
+
+// executeK8sListResources handles the k8s_list_resources tool.
+func (s *Server) executeK8sListResources(ctx context.Context, args map[string]interface{}) (result string, err error) {
+	var agent *k8s.Agent
+
+	agent, err = s.resolveK8sAgent(optStringArg(args, "cluster"))
+	if err != nil {
+		return result, err
+	}
+
+	result, err = agent.ListResources(ctx,
+		optStringArg(args, "resource_type"),
+		optStringArg(args, "namespace"),
+		optStringArg(args, "label_selector"))
 
 	return result, err
 }

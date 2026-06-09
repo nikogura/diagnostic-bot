@@ -166,10 +166,11 @@ func (s *SDKServer) registerK8sTools() {
 	}
 
 	handlers := map[string]func(context.Context, map[string]interface{}) (string, error){
-		toolK8sGetResource: s.legacy.executeK8sGetResource,
-		toolK8sPodLogs:     s.legacy.executeK8sPodLogs,
-		toolK8sListPods:    s.legacy.executeK8sListPods,
-		toolK8sGetEvents:   s.legacy.executeK8sGetEvents,
+		toolK8sGetResource:   s.legacy.executeK8sGetResource,
+		toolK8sListResources: s.legacy.executeK8sListResources,
+		toolK8sPodLogs:       s.legacy.executeK8sPodLogs,
+		toolK8sListPods:      s.legacy.executeK8sListPods,
+		toolK8sGetEvents:     s.legacy.executeK8sGetEvents,
 	}
 
 	for _, t := range getK8sTools() {

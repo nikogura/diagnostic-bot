@@ -11,7 +11,6 @@ import (
 
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/client-go/dynamic"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/rest"
@@ -207,73 +206,6 @@ func (a *Agent) FetchLogs(ctx context.Context, req LogRequest) (result string, e
 	if result == "" {
 		result = "No log data retrieved."
 	}
-
-	return result, err
-}
-
-// GetResource retrieves a Kubernetes resource configuration. Only a fixed
-// allowlist of resource types is readable; Secrets are explicitly excluded and
-// there is no generic "get any resource" path. Returned output is run through
-// the secret/PII sanitizer before it leaves.
-func (a *Agent) GetResource(ctx context.Context, resourceType string, namespace string, name string, outputFormat string) (result string, err error) {
-	a.logger.InfoContext(ctx, "getting Kubernetes resource",
-		slog.String("type", resourceType),
-		slog.String("namespace", namespace),
-		slog.String("name", name),
-		slog.String("format", outputFormat))
-
-	// Record metrics
-	metrics.RecordK8sQuery(ctx, namespace, resourceType)
-
-	var resource interface{}
-
-	switch strings.ToLower(resourceType) {
-	case "configmap":
-		resource, err = a.clientset.CoreV1().ConfigMaps(namespace).Get(ctx, name, metav1.GetOptions{})
-
-	case "deployment":
-		resource, err = a.clientset.AppsV1().Deployments(namespace).Get(ctx, name, metav1.GetOptions{})
-
-	case "service":
-		resource, err = a.clientset.CoreV1().Services(namespace).Get(ctx, name, metav1.GetOptions{})
-
-	case "pod":
-		resource, err = a.clientset.CoreV1().Pods(namespace).Get(ctx, name, metav1.GetOptions{})
-
-	case "gitrepository":
-		gvr := schema.GroupVersionResource{Group: "source.toolkit.fluxcd.io", Version: "v1", Resource: "gitrepositories"}
-		resource, err = a.dynamicClient.Resource(gvr).Namespace(namespace).Get(ctx, name, metav1.GetOptions{})
-
-	case "kustomization":
-		gvr := schema.GroupVersionResource{Group: "kustomize.toolkit.fluxcd.io", Version: "v1", Resource: "kustomizations"}
-		resource, err = a.dynamicClient.Resource(gvr).Namespace(namespace).Get(ctx, name, metav1.GetOptions{})
-
-	case "atlasmigration":
-		gvr := schema.GroupVersionResource{Group: "db.atlasgo.io", Version: "v1alpha1", Resource: "atlasmigrations"}
-		resource, err = a.dynamicClient.Resource(gvr).Namespace(namespace).Get(ctx, name, metav1.GetOptions{})
-
-	case "secret", "secrets":
-		// Secrets are never readable through this tool, by design. This explicit
-		// deny is belt-and-suspenders on top of the allowlist below and the RBAC
-		// that withholds the secrets verb.
-		err = errors.New("reading Kubernetes Secrets is not permitted")
-		return result, err
-
-	default:
-		err = fmt.Errorf("unsupported or non-allowlisted resource type: %s", resourceType)
-		return result, err
-	}
-
-	if err != nil {
-		err = fmt.Errorf("fetching resource: %w", err)
-		return result, err
-	}
-
-	// Format output
-	formatted := fmt.Sprintf("%+v", resource)
-
-	// Sanitize
-	result = a.sanitizer.Sanitize(formatted)
 
 	return result, err
 }

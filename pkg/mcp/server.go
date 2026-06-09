@@ -981,6 +981,8 @@ func (s *Server) dispatchExtendedToolCall(ctx context.Context, toolName string, 
 		result, err = s.executeGraphQLListEndpoints(ctx, args)
 	case toolK8sGetResource:
 		result, err = s.executeK8sGetResource(ctx, args)
+	case toolK8sListResources:
+		result, err = s.executeK8sListResources(ctx, args)
 	case toolK8sPodLogs:
 		result, err = s.executeK8sPodLogs(ctx, args)
 	case toolK8sListPods:
