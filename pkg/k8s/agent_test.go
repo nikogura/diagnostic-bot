@@ -30,11 +30,13 @@ func testAgent(objects ...runtime.Object) (agent *Agent) {
 //
 //nolint:gochecknoglobals // test fixture
 var gvrListKinds = map[schema.GroupVersionResource]string{
-	{Version: "v1", Resource: "configmaps"}:                                     "ConfigMapList",
-	{Group: "gateway.networking.k8s.io", Version: "v1", Resource: "httproutes"}: "HTTPRouteList",
-	{Group: "cert-manager.io", Version: "v1", Resource: "certificates"}:         "CertificateList",
-	{Group: "cert-manager.io", Version: "v1", Resource: "certificaterequests"}:  "CertificateRequestList",
-	{Group: "argoproj.io", Version: "v1alpha1", Resource: "applications"}:       "ApplicationList",
+	{Version: "v1", Resource: "configmaps"}:                                        "ConfigMapList",
+	{Group: "gateway.networking.k8s.io", Version: "v1", Resource: "httproutes"}:    "HTTPRouteList",
+	{Group: "cert-manager.io", Version: "v1", Resource: "certificates"}:            "CertificateList",
+	{Group: "cert-manager.io", Version: "v1", Resource: "certificaterequests"}:     "CertificateRequestList",
+	{Group: "argoproj.io", Version: "v1alpha1", Resource: "applications"}:          "ApplicationList",
+	{Group: "networking.istio.io", Version: "v1", Resource: "virtualservices"}:     "VirtualServiceList",
+	{Group: "security.istio.io", Version: "v1", Resource: "authorizationpolicies"}: "AuthorizationPolicyList",
 }
 
 // dynamicTestAgent builds an Agent backed by a fake dynamic client.
@@ -161,6 +163,47 @@ func TestListResourcesAcrossNamespaces(t *testing.T) {
 	for _, want := range []string{"grafana-legacy", "grafana-nxtools", "grafana.tools.nxteam.dev", "grafana.nxtools.dev", "apps", "infra"} {
 		if !strings.Contains(result, want) {
 			t.Errorf("list output missing %q:\n%s", want, result)
+		}
+	}
+}
+
+func TestGetResourceIstioVirtualService(t *testing.T) {
+	t.Parallel()
+
+	vs := unstructuredObj("networking.istio.io/v1", "VirtualService", "apps", "grafana", map[string]any{
+		"spec": map[string]any{
+			"hosts":    []any{"grafana.nxtools.dev"},
+			"gateways": []any{"istio-ingress/nxtools-gateway"},
+		},
+	})
+
+	result, err := dynamicTestAgent(vs).GetResource(context.Background(), "virtualservice", "apps", "grafana", "")
+	if err != nil {
+		t.Fatalf("GetResource(virtualservice): %v", err)
+	}
+
+	for _, want := range []string{"grafana.nxtools.dev", "nxtools-gateway"} {
+		if !strings.Contains(result, want) {
+			t.Errorf("virtualservice output missing %q:\n%s", want, result)
+		}
+	}
+}
+
+func TestListResourcesIstioAuthorizationPolicies(t *testing.T) {
+	t.Parallel()
+
+	ap := unstructuredObj("security.istio.io/v1", "AuthorizationPolicy", "apps", "require-jwt", map[string]any{
+		"spec": map[string]any{"action": "ALLOW"},
+	})
+
+	result, err := dynamicTestAgent(ap).ListResources(context.Background(), "authorizationpolicy", "", "")
+	if err != nil {
+		t.Fatalf("ListResources(authorizationpolicy): %v", err)
+	}
+
+	for _, want := range []string{"require-jwt", "ALLOW", "apps"} {
+		if !strings.Contains(result, want) {
+			t.Errorf("authorizationpolicy list missing %q:\n%s", want, result)
 		}
 	}
 }

@@ -29,6 +29,11 @@ const (
 	groupEnvoyGateway = "gateway.envoyproxy.io"
 	groupCertManager  = "cert-manager.io"
 	groupArgo         = "argoproj.io"
+
+	groupIstioNetworking = "networking.istio.io"
+	groupIstioSecurity   = "security.istio.io"
+	groupIstioExtensions = "extensions.istio.io"
+	groupIstioTelemetry  = "telemetry.istio.io"
 )
 
 // allowedK8sResources is the read-only allowlist of resource types the bot may
@@ -95,6 +100,22 @@ var allowedK8sResources = map[string]resourceMapping{
 	"workflow":         {gvr: schema.GroupVersionResource{Group: groupArgo, Version: "v1alpha1", Resource: "workflows"}},
 	"cronworkflow":     {gvr: schema.GroupVersionResource{Group: groupArgo, Version: "v1alpha1", Resource: "cronworkflows"}},
 	"workflowtemplate": {gvr: schema.GroupVersionResource{Group: groupArgo, Version: "v1alpha1", Resource: "workflowtemplates"}},
+	// Istio networking (istio-gateway is networking.istio.io/Gateway, distinct from the Gateway API "gateway")
+	"virtualservice":  {gvr: schema.GroupVersionResource{Group: groupIstioNetworking, Version: "v1", Resource: "virtualservices"}},
+	"destinationrule": {gvr: schema.GroupVersionResource{Group: groupIstioNetworking, Version: "v1", Resource: "destinationrules"}},
+	"istio-gateway":   {gvr: schema.GroupVersionResource{Group: groupIstioNetworking, Version: "v1", Resource: "gateways"}},
+	"serviceentry":    {gvr: schema.GroupVersionResource{Group: groupIstioNetworking, Version: "v1", Resource: "serviceentries"}},
+	"sidecar":         {gvr: schema.GroupVersionResource{Group: groupIstioNetworking, Version: "v1", Resource: "sidecars"}},
+	"workloadentry":   {gvr: schema.GroupVersionResource{Group: groupIstioNetworking, Version: "v1", Resource: "workloadentries"}},
+	"workloadgroup":   {gvr: schema.GroupVersionResource{Group: groupIstioNetworking, Version: "v1", Resource: "workloadgroups"}},
+	"envoyfilter":     {gvr: schema.GroupVersionResource{Group: groupIstioNetworking, Version: "v1alpha3", Resource: "envoyfilters"}},
+	// Istio security
+	"authorizationpolicy":   {gvr: schema.GroupVersionResource{Group: groupIstioSecurity, Version: "v1", Resource: "authorizationpolicies"}},
+	"peerauthentication":    {gvr: schema.GroupVersionResource{Group: groupIstioSecurity, Version: "v1", Resource: "peerauthentications"}},
+	"requestauthentication": {gvr: schema.GroupVersionResource{Group: groupIstioSecurity, Version: "v1", Resource: "requestauthentications"}},
+	// Istio extensions / telemetry
+	"wasmplugin": {gvr: schema.GroupVersionResource{Group: groupIstioExtensions, Version: "v1alpha1", Resource: "wasmplugins"}},
+	"telemetry":  {gvr: schema.GroupVersionResource{Group: groupIstioTelemetry, Version: "v1", Resource: "telemetries"}},
 	// Atlas
 	"atlasmigration": {gvr: schema.GroupVersionResource{Group: "db.atlasgo.io", Version: "v1alpha1", Resource: "atlasmigrations"}},
 }
