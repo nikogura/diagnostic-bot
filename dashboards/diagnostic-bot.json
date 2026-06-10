@@ -41,16 +41,6 @@
         "refresh": 2,
         "includeAll": true,
         "current": {}
-      },
-      {
-        "name": "pod",
-        "label": "Pod",
-        "type": "query",
-        "datasource": { "type": "prometheus", "uid": "${prometheus}" },
-        "query": "label_values(container_cpu_usage_seconds_total{namespace=~\"$namespace\", pod=~\"diagnostic-bot.*\"}, pod)",
-        "refresh": 2,
-        "includeAll": true,
-        "current": {}
       }
     ]
   },
@@ -193,7 +183,7 @@
       "gridPos": { "h": 10, "w": 14, "x": 0, "y": 25 },
       "options": { "showLabels": false, "showTime": true, "wrapLogMessage": true, "sortOrder": "Descending" },
       "targets": [
-        { "refId": "A", "expr": "{namespace=~\"$namespace\", pod=~\"diagnostic-bot.*\"} | json", "queryType": "range" }
+        { "refId": "A", "expr": "{namespace=~\"$namespace\"} | json", "queryType": "range" }
       ]
     },
     {
@@ -230,7 +220,7 @@
         "overrides": []
       },
       "targets": [
-        { "refId": "A", "expr": "100 * sum by (pod) (rate(container_cpu_usage_seconds_total{namespace=~\"$namespace\", pod=~\"diagnostic-bot.*\", container!=\"\"}[5m])) / sum by (pod) (kube_pod_container_resource_limits{namespace=~\"$namespace\", pod=~\"diagnostic-bot.*\", resource=\"cpu\"})", "legendFormat": "{{pod}}" }
+        { "refId": "A", "expr": "100 * sum by (pod) (rate(container_cpu_usage_seconds_total{namespace=~\"$namespace\", container!=\"\"}[5m])) / sum by (pod) (kube_pod_container_resource_limits{namespace=~\"$namespace\", resource=\"cpu\"})", "legendFormat": "{{pod}}" }
       ]
     },
     {
@@ -249,7 +239,7 @@
         "overrides": []
       },
       "targets": [
-        { "refId": "A", "expr": "100 * sum by (pod) (rate(container_cpu_usage_seconds_total{namespace=~\"$namespace\", pod=~\"diagnostic-bot.*\", container!=\"\"}[5m])) / sum by (pod) (kube_pod_container_resource_requests{namespace=~\"$namespace\", pod=~\"diagnostic-bot.*\", resource=\"cpu\"})", "legendFormat": "{{pod}}" }
+        { "refId": "A", "expr": "100 * sum by (pod) (rate(container_cpu_usage_seconds_total{namespace=~\"$namespace\", container!=\"\"}[5m])) / sum by (pod) (kube_pod_container_resource_requests{namespace=~\"$namespace\", resource=\"cpu\"})", "legendFormat": "{{pod}}" }
       ]
     },
     {
@@ -269,7 +259,7 @@
         "overrides": []
       },
       "targets": [
-        { "refId": "A", "expr": "100 * sum by (pod) (rate(container_cpu_cfs_throttled_periods_total{namespace=~\"$namespace\", pod=~\"diagnostic-bot.*\", container!=\"\"}[5m])) / sum by (pod) (rate(container_cpu_cfs_periods_total{namespace=~\"$namespace\", pod=~\"diagnostic-bot.*\", container!=\"\"}[5m]))", "legendFormat": "{{pod}}" }
+        { "refId": "A", "expr": "100 * sum by (pod) (rate(container_cpu_cfs_throttled_periods_total{namespace=~\"$namespace\", container!=\"\"}[5m])) / sum by (pod) (rate(container_cpu_cfs_periods_total{namespace=~\"$namespace\", container!=\"\"}[5m]))", "legendFormat": "{{pod}}" }
       ]
     },
     {
@@ -289,7 +279,7 @@
         "overrides": []
       },
       "targets": [
-        { "refId": "A", "expr": "100 * sum by (pod) (container_memory_working_set_bytes{namespace=~\"$namespace\", pod=~\"diagnostic-bot.*\", container!=\"\"}) / sum by (pod) (kube_pod_container_resource_limits{namespace=~\"$namespace\", pod=~\"diagnostic-bot.*\", resource=\"memory\"})", "legendFormat": "{{pod}}" }
+        { "refId": "A", "expr": "100 * sum by (pod) (container_memory_working_set_bytes{namespace=~\"$namespace\", container!=\"\"}) / sum by (pod) (kube_pod_container_resource_limits{namespace=~\"$namespace\", resource=\"memory\"})", "legendFormat": "{{pod}}" }
       ]
     },
     {
@@ -308,7 +298,7 @@
         "overrides": []
       },
       "targets": [
-        { "refId": "A", "expr": "100 * sum by (pod) (container_memory_working_set_bytes{namespace=~\"$namespace\", pod=~\"diagnostic-bot.*\", container!=\"\"}) / sum by (pod) (kube_pod_container_resource_requests{namespace=~\"$namespace\", pod=~\"diagnostic-bot.*\", resource=\"memory\"})", "legendFormat": "{{pod}}" }
+        { "refId": "A", "expr": "100 * sum by (pod) (container_memory_working_set_bytes{namespace=~\"$namespace\", container!=\"\"}) / sum by (pod) (kube_pod_container_resource_requests{namespace=~\"$namespace\", resource=\"memory\"})", "legendFormat": "{{pod}}" }
       ]
     },
     {
@@ -320,7 +310,7 @@
       "gridPos": { "h": 8, "w": 8, "x": 16, "y": 44 },
       "fieldConfig": { "defaults": { "unit": "bytes", "custom": { "drawStyle": "line", "fillOpacity": 10 } }, "overrides": [] },
       "targets": [
-        { "refId": "A", "expr": "sum by (pod) (container_memory_working_set_bytes{namespace=~\"$namespace\", pod=~\"diagnostic-bot.*\", container!=\"\"})", "legendFormat": "{{pod}}" }
+        { "refId": "A", "expr": "sum by (pod) (container_memory_working_set_bytes{namespace=~\"$namespace\", container!=\"\"})", "legendFormat": "{{pod}}" }
       ]
     }
   ]
