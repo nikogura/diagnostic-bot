@@ -73,16 +73,21 @@ type ProtectedResourceMetadata struct {
 // Claude Code reads to discover which OAuth authorization server to
 // point the browser at. This endpoint must NOT be protected by WithAuth
 // — clients have to be able to fetch it before they have a token.
-func ProtectedResourceMetadataHandler(resourceURL, authServerURL string, scopes []string) (handler http.Handler) {
-	body, err := json.Marshal(ProtectedResourceMetadata{
+func ProtectedResourceMetadataHandler(resourceURL, authServerURL string, scopes []string) (handler http.Handler, err error) {
+	var body []byte
+
+	body, err = json.Marshal(ProtectedResourceMetadata{
 		Resource:               resourceURL,
 		AuthorizationServers:   []string{authServerURL},
 		BearerMethodsSupported: []string{"header"},
 		ScopesSupported:        scopes,
 	})
 	if err != nil {
-		// Constants in, no way to fail; panic surfaces the misconfig at startup.
-		panic(fmt.Sprintf("marshaling protected resource metadata: %v", err))
+		// Constant string fields make this effectively unreachable, but never
+		// panic: surface it to the caller, which skips the route rather than
+		// taking the process down.
+		err = fmt.Errorf("marshaling protected resource metadata: %w", err)
+		return handler, err
 	}
 
 	handler = http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
@@ -90,5 +95,5 @@ func ProtectedResourceMetadataHandler(resourceURL, authServerURL string, scopes 
 		w.Header().Set("Cache-Control", "public, max-age=300")
 		_, _ = w.Write(body)
 	})
-	return handler
+	return handler, err
 }

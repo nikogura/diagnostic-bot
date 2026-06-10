@@ -46,6 +46,7 @@ func TestInitRecordsMetricsWithExpectedNames(t *testing.T) {
 	ObserveInvestigationDuration(ctx, "modsecurity", "success", 4.2)
 	AddInvestigationInFlight(ctx, 1)
 	SetConversationsActive(3)
+	RecordPanicRecovered(ctx, "events_api")
 
 	families, gatherErr := registry.Gather()
 	if gatherErr != nil {
@@ -69,11 +70,27 @@ func TestInitRecordsMetricsWithExpectedNames(t *testing.T) {
 		"investigation_duration_seconds",
 		"investigations_in_flight",
 		"conversations_active",
+		"panics_recovered_total",
 	}
 
 	for _, name := range want {
 		if !got[name] {
 			t.Errorf("expected metric %q to be exported; gathered: %v", name, got)
 		}
+	}
+}
+
+// TestSetGetConversationsActiveRoundTrip verifies the getter reflects whatever
+// the setter last stored, including a decrement back toward zero.
+func TestSetGetConversationsActiveRoundTrip(t *testing.T) {
+	// Not parallel: the backing value is a package-global the other tests touch.
+	SetConversationsActive(7)
+	if got := GetConversationsActive(); got != 7 {
+		t.Errorf("GetConversationsActive() after Set(7) = %d, want 7", got)
+	}
+
+	SetConversationsActive(0)
+	if got := GetConversationsActive(); got != 0 {
+		t.Errorf("GetConversationsActive() after Set(0) = %d, want 0", got)
 	}
 }

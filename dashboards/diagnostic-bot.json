@@ -103,7 +103,7 @@
       "description": "Saturation: investigations currently executing.",
       "id": 5,
       "datasource": { "type": "prometheus", "uid": "${prometheus}" },
-      "gridPos": { "h": 6, "w": 8, "x": 0, "y": 9 },
+      "gridPos": { "h": 6, "w": 6, "x": 0, "y": 9 },
       "fieldConfig": { "defaults": { "unit": "short", "thresholds": { "mode": "absolute", "steps": [ { "color": "green", "value": null } ] } }, "overrides": [] },
       "options": { "reduceOptions": { "calcs": ["lastNotNull"] }, "colorMode": "value" },
       "targets": [ { "refId": "A", "expr": "sum(investigations_in_flight)", "legendFormat": "in flight" } ]
@@ -114,7 +114,7 @@
       "description": "Open Slack investigation conversations.",
       "id": 6,
       "datasource": { "type": "prometheus", "uid": "${prometheus}" },
-      "gridPos": { "h": 6, "w": 8, "x": 8, "y": 9 },
+      "gridPos": { "h": 6, "w": 6, "x": 6, "y": 9 },
       "fieldConfig": { "defaults": { "unit": "short", "thresholds": { "mode": "absolute", "steps": [ { "color": "green", "value": null } ] } }, "overrides": [] },
       "options": { "reduceOptions": { "calcs": ["lastNotNull"] }, "colorMode": "value" },
       "targets": [ { "refId": "A", "expr": "sum(conversations_active)", "legendFormat": "active" } ]
@@ -125,9 +125,20 @@
       "description": "Forged control sequences defanged from untrusted tool output. Any sustained signal here is a probe, not noise.",
       "id": 7,
       "datasource": { "type": "prometheus", "uid": "${prometheus}" },
-      "gridPos": { "h": 6, "w": 8, "x": 16, "y": 9 },
+      "gridPos": { "h": 6, "w": 6, "x": 12, "y": 9 },
       "fieldConfig": { "defaults": { "unit": "short", "custom": { "drawStyle": "bars", "fillOpacity": 60 } }, "overrides": [] },
       "targets": [ { "refId": "A", "expr": "sum by (category) (rate(injection_defangs_total[5m]))", "legendFormat": "{{category}}" } ]
+    },
+    {
+      "type": "stat",
+      "title": "Panics Recovered (Self-Heal)",
+      "description": "Panics contained by the goroutine recovery boundary instead of crashing the process. Should stay at zero; any value is a programmer error to investigate.",
+      "id": 22,
+      "datasource": { "type": "prometheus", "uid": "${prometheus}" },
+      "gridPos": { "h": 6, "w": 6, "x": 18, "y": 9 },
+      "fieldConfig": { "defaults": { "unit": "short", "thresholds": { "mode": "absolute", "steps": [ { "color": "green", "value": null }, { "color": "red", "value": 1 } ] } }, "overrides": [] },
+      "options": { "reduceOptions": { "calcs": [ "lastNotNull" ] }, "colorMode": "background" },
+      "targets": [ { "refId": "A", "expr": "sum(increase(panics_recovered_total[$__range]))", "legendFormat": "panics" } ]
     },
     {
       "type": "row",

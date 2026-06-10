@@ -123,7 +123,7 @@ func (b *Bot) startInvestigation(ctx context.Context, channel string, threadTS s
 
 	// Record metrics
 	metrics.RecordInvestigationStarted(ctx, string(matchResult.InvestigationType))
-	metrics.SetConversationsActive(int64(b.conversations.Count()))
+	b.syncConversationsActive()
 
 	b.logger.InfoContext(ctx, "starting investigation",
 		slog.String("type", string(matchResult.InvestigationType)),

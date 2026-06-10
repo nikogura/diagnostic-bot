@@ -112,11 +112,12 @@ func TestResultFromContextReturnsNilWhenAbsent(t *testing.T) {
 // Document shape must match RFC 9728.
 func TestProtectedResourceMetadataHandlerReturnsRFC9728JSON(t *testing.T) {
 	t.Parallel()
-	handler := ProtectedResourceMetadataHandler(
+	handler, err := ProtectedResourceMetadataHandler(
 		"https://bot.example.com/mcp",
 		"https://accounts.google.com",
 		[]string{"openid", "email", "profile"},
 	)
+	require.NoError(t, err)
 
 	rec := httptest.NewRecorder()
 	handler.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/.well-known/oauth-protected-resource", nil))

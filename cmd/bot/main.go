@@ -533,11 +533,19 @@ func registerOAuthMetadataRoute(mux *http.ServeMux, logger *slog.Logger) {
 		return
 	}
 
-	mux.Handle("/.well-known/oauth-protected-resource", auth.ProtectedResourceMetadataHandler(
+	metadataHandler, err := auth.ProtectedResourceMetadataHandler(
 		publicURL+"/mcp",
 		authServerURL,
 		scopes,
-	))
+	)
+	if err != nil {
+		logger.Error("not registering OAuth metadata route: building handler failed",
+			slog.String("error", err.Error()),
+		)
+		return
+	}
+
+	mux.Handle("/.well-known/oauth-protected-resource", metadataHandler)
 	logger.Info("registered /.well-known/oauth-protected-resource for MCP OAuth discovery",
 		slog.String("authorization_server", authServerURL),
 	)

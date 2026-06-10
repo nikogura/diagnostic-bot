@@ -22,6 +22,7 @@ const (
 	TokenType         = "token_type"
 	ToolName          = "tool_name"
 	Category          = "category"
+	Site              = "site"
 )
 
 //nolint:gochecknoglobals // OTel instruments are process-wide singletons by design.
@@ -36,6 +37,7 @@ var (
 	injectionDefangs       metric.Int64Counter
 	investigationDuration  metric.Float64Histogram
 	investigationsInFlight metric.Int64UpDownCounter
+	panicsRecovered        metric.Int64Counter
 
 	// conversationsActiveValue backs the conversations_active observable gauge.
 	conversationsActiveValue atomic.Int64
@@ -87,6 +89,10 @@ func Init(meter metric.Meter) (err error) {
 		metric.WithDescription("Number of investigations currently executing"))
 	errs = append(errs, err)
 
+	panicsRecovered, err = meter.Int64Counter("panics_recovered_total",
+		metric.WithDescription("Total panics recovered in spawned goroutines, by site (self-heal; should stay flat at zero)"))
+	errs = append(errs, err)
+
 	err = registerConversationsActive(meter)
 	errs = append(errs, err)
 
@@ -129,6 +135,24 @@ func RecordInvestigationResolved(ctx context.Context, invType string) {
 // SetConversationsActive updates the active-conversation gauge value.
 func SetConversationsActive(count int64) {
 	conversationsActiveValue.Store(count)
+}
+
+// GetConversationsActive returns the value backing the conversations_active
+// gauge. Exposed so callers and tests can read back the currently reported count.
+func GetConversationsActive() (count int64) {
+	count = conversationsActiveValue.Load()
+	return count
+}
+
+// RecordPanicRecovered increments the recovered-panic counter for a goroutine
+// site. A non-zero value means a panic was contained instead of crashing the
+// process — it should alert, because panics are programmer errors, not control flow.
+func RecordPanicRecovered(ctx context.Context, site string) {
+	if panicsRecovered == nil {
+		return
+	}
+
+	panicsRecovered.Add(ctx, 1, metric.WithAttributes(attribute.String(Site, site)))
 }
 
 // AddInvestigationInFlight adjusts the in-flight saturation gauge by delta.

@@ -6,12 +6,14 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"runtime/debug"
 	"strings"
 	"sync"
 	"time"
 
 	"github.com/nikogura/diagnostic-bot/pkg/claude"
 	"github.com/nikogura/diagnostic-bot/pkg/investigations"
+	"github.com/nikogura/diagnostic-bot/pkg/metrics"
 	"github.com/slack-go/slack"
 	"github.com/slack-go/slack/slackevents"
 	"github.com/slack-go/slack/socketmode"
@@ -132,10 +134,10 @@ func (b *Bot) Start(ctx context.Context) (err error) {
 		slog.String("bot_user_id", b.botUserID))
 
 	// Start cleanup goroutine
-	go b.cleanupLoop(ctx)
+	b.safeGo(ctx, "cleanup_loop", func() { b.cleanupLoop(ctx) })
 
 	// Handle socket mode events
-	go b.handleSocketMode(ctx)
+	b.safeGo(ctx, "socket_mode", func() { b.handleSocketMode(ctx) })
 
 	// Run socket mode client
 	err = b.socketClient.RunContext(ctx)
@@ -179,7 +181,7 @@ func (b *Bot) handleSocketMode(ctx context.Context) {
 				}
 
 				b.socketClient.Ack(*evt.Request)
-				go b.handleEventsAPI(ctx, eventsAPI)
+				b.safeGo(ctx, "events_api", func() { b.handleEventsAPI(ctx, eventsAPI) })
 
 			case socketmode.EventTypeInteractive:
 				// Handle interactive events (buttons, etc.) if needed
@@ -212,6 +214,43 @@ func (b *Bot) handleEventsAPI(ctx context.Context, event slackevents.EventsAPIEv
 	}
 }
 
+// safeGo runs fn in a new goroutine guarded by a panic recovery boundary. An
+// unrecovered panic in any goroutine crashes the whole process; every goroutine
+// the bot launches must go through here so one bad investigation degrades to a
+// single failed request instead of a CrashLoopBackOff. site names the goroutine
+// for logs and the panics_recovered_total metric.
+func (b *Bot) safeGo(ctx context.Context, site string, fn func()) {
+	go func() {
+		defer b.recoverPanic(ctx, site)
+		fn()
+	}()
+}
+
+// recoverPanic contains a panic in a spawned goroutine: it records the panic on
+// the panics_recovered_total counter and logs it with a stack trace, then
+// returns so the process keeps serving. Deferred at the top of every goroutine
+// started via safeGo.
+func (b *Bot) recoverPanic(ctx context.Context, site string) {
+	r := recover()
+	if r == nil {
+		return
+	}
+
+	metrics.RecordPanicRecovered(ctx, site)
+	b.logger.ErrorContext(ctx, "recovered from panic in goroutine",
+		slog.String("site", site),
+		slog.Any("panic", r),
+		slog.String("stack", string(debug.Stack())))
+}
+
+// syncConversationsActive refreshes the conversations_active gauge to match the
+// store. Call it after any operation that can change the count — creating a
+// conversation or expiring stale ones — so the gauge never drifts above the real
+// number of live conversations.
+func (b *Bot) syncConversationsActive() {
+	metrics.SetConversationsActive(int64(b.conversations.Count()))
+}
+
 // cleanupLoop periodically cleans up expired conversations and old files.
 func (b *Bot) cleanupLoop(ctx context.Context) {
 	ticker := time.NewTicker(CleanupInterval)
@@ -223,20 +262,31 @@ func (b *Bot) cleanupLoop(ctx context.Context) {
 			return
 
 		case <-ticker.C:
-			// Clean up expired conversations
-			removed := b.conversations.CleanupExpired()
-			if removed > 0 {
-				b.logger.InfoContext(ctx, "cleaned up expired conversations",
-					slog.Int("removed", removed))
-			}
-
-			// Clean up old generated files
-			filesRemoved := b.cleanupOldFiles(ctx)
-			if filesRemoved > 0 {
-				b.logger.InfoContext(ctx, "cleaned up old files",
-					slog.Int("removed", filesRemoved))
-			}
+			b.runCleanup(ctx)
 		}
+	}
+}
+
+// runCleanup performs one cleanup pass: expire idle conversations, re-sync the
+// active-conversation gauge to the store, and remove old generated files. Split
+// out of cleanupLoop so a pass can be exercised in tests without the ticker.
+func (b *Bot) runCleanup(ctx context.Context) {
+	// Clean up expired conversations
+	removed := b.conversations.CleanupExpired()
+	if removed > 0 {
+		b.logger.InfoContext(ctx, "cleaned up expired conversations",
+			slog.Int("removed", removed))
+	}
+
+	// CleanupExpired shrinks the store, so re-sync the gauge every pass —
+	// otherwise it stays pinned at its last create-time value and reads high.
+	b.syncConversationsActive()
+
+	// Clean up old generated files
+	filesRemoved := b.cleanupOldFiles(ctx)
+	if filesRemoved > 0 {
+		b.logger.InfoContext(ctx, "cleaned up old files",
+			slog.Int("removed", filesRemoved))
 	}
 }
 
