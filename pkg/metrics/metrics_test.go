@@ -37,7 +37,7 @@ func TestInitRecordsMetricsWithExpectedNames(t *testing.T) {
 	ctx := context.Background()
 	RecordInvestigationStarted(ctx, "modsecurity")
 	RecordInvestigationResolved(ctx, "modsecurity")
-	RecordToolExecution(ctx, "query_loki", "success")
+	RecordToolExecution(ctx, "loki_query", "success")
 	RecordInjectionDefang(ctx, "forged role label")
 	RecordClaudeAPICall(ctx, "success")
 	AddClaudeAPITokens(ctx, "input", 100)

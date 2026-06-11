@@ -117,7 +117,7 @@ initial_prompt: |
 
   ## Available Tools
 
-  ### `query_loki`
+  ### `loki_query`
   Query Loki log aggregation using LogQL.
   - **Use for**: Application logs, time-series log analysis
   - **Syntax**: LogQL (e.g., `{namespace="default",app="myapp"} |= "error"`)

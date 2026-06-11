@@ -17,7 +17,7 @@ initial_prompt: |
 
   You MUST perform these steps in order:
 
-  1. **Query Loki** for ModSecurity blocks using mcp__diagnostic__query_loki:
+  1. **Query Loki** for ModSecurity blocks using mcp__diagnostic__loki_query:
      - Default query: `{realm="{{REALM}}", namespace="{{INGRESS_NAMESPACE}}"} |~ "ModSecurity" | json | transaction_response_http_code="403"`
      - Default time range: last 24 hours (use `start time 24h`)
      - Default limit: 100 results

@@ -188,7 +188,7 @@ func TestWriteToolUsageOnlyUtilities(t *testing.T) {
 	assert.Contains(t, output, "generate_pdf", "Should always include generate_pdf")
 
 	// Should NOT include any optional tools
-	assert.NotContains(t, output, "query_loki", "Should not include Loki tools")
+	assert.NotContains(t, output, "loki_query", "Should not include Loki tools")
 	assert.NotContains(t, output, "cloudwatch_logs_query", "Should not include CloudWatch tools")
 	assert.NotContains(t, output, "prometheus_query", "Should not include Prometheus tools")
 	assert.NotContains(t, output, "grafana_list_dashboards", "Should not include Grafana tools")
@@ -206,7 +206,7 @@ func TestWriteToolUsageWithLoki(t *testing.T) {
 	config.WriteToolUsage(&builder)
 	output := builder.String()
 
-	assert.Contains(t, output, "query_loki", "Should include Loki tool")
+	assert.Contains(t, output, "loki_query", "Should include Loki tool")
 	assert.Contains(t, output, "whois_lookup", "Should always include utilities")
 	assert.NotContains(t, output, "cloudwatch_logs_query", "Should not include CloudWatch")
 }
@@ -223,7 +223,7 @@ func TestWriteToolUsageWithCloudWatch(t *testing.T) {
 	assert.Contains(t, output, "cloudwatch_logs_query", "Should include CloudWatch query tool")
 	assert.Contains(t, output, "cloudwatch_logs_list_groups", "Should include CloudWatch list groups tool")
 	assert.Contains(t, output, "cloudwatch_logs_get_events", "Should include CloudWatch get events tool")
-	assert.NotContains(t, output, "query_loki", "Should not include Loki")
+	assert.NotContains(t, output, "loki_query", "Should not include Loki")
 }
 
 func TestWriteToolUsageAllEnabled(t *testing.T) {
@@ -245,7 +245,7 @@ func TestWriteToolUsageAllEnabled(t *testing.T) {
 
 	// All tool categories should be present
 	expectedTools := []string{
-		"query_loki",
+		"loki_query",
 		"cloudwatch_logs_query",
 		"prometheus_query",
 		"grafana_list_dashboards",

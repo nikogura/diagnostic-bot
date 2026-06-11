@@ -140,7 +140,7 @@ func hasDatabaseConfig() (available bool) {
 
 func writeLokiToolUsage(builder *strings.Builder) {
 	builder.WriteString("**Logging (Loki):**\n")
-	builder.WriteString("- `query_loki`: Query Loki for cluster logs (ModSecurity, application logs). Use LogQL syntax.\n")
+	builder.WriteString("- `loki_query`: Query Loki for cluster logs (ModSecurity, application logs). Use LogQL syntax.\n")
 	builder.WriteString("  Example: `{realm=\"prod\", namespace=\"ingress-nginx\"} |~ \"ModSecurity\" | json | transaction_response_http_code=\"403\"`\n\n")
 }
 

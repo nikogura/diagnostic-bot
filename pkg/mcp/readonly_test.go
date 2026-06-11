@@ -74,7 +74,7 @@ func TestIsWriteTool(t *testing.T) {
 		toolGrafanaListDashboards,
 		toolGrafanaGetDashboard,
 		toolGrafanaGetDashboardVersion,
-		toolQueryLoki,
+		toolLokiQuery,
 		toolDatabaseQuery,
 		toolWhoisLookup,
 	}

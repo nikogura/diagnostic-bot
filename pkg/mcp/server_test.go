@@ -57,12 +57,12 @@ func TestGetLokiTools(t *testing.T) {
 		t.Fatalf("getLokiTools() returned %d tools, want 1", len(tools))
 	}
 
-	if tools[0].Name != "query_loki" {
-		t.Errorf("getLokiTools() tool name = %s, want query_loki", tools[0].Name)
+	if tools[0].Name != "loki_query" {
+		t.Errorf("getLokiTools() tool name = %s, want loki_query", tools[0].Name)
 	}
 }
 
-// TestGetLokiToolsExposesTenantArgWhenAllowlistSet verifies the query_loki
+// TestGetLokiToolsExposesTenantArgWhenAllowlistSet verifies the loki_query
 // schema gains a tenant field and the tool description advertises the
 // allowed tenants so the calling LLM can discover valid values without
 // guessing.
@@ -97,10 +97,10 @@ func TestGetLokiToolsOmitsTenantDescriptionWhenNoAllowlist(t *testing.T) {
 	require.NotContains(t, tools[0].Description, "Allowed tenants")
 }
 
-// TestExecuteQueryLokiPassesTenantToBackend verifies the executor reads the
+// TestExecuteLokiQueryPassesTenantToBackend verifies the executor reads the
 // tenant arg from the MCP call and forwards it to the LokiClient, which in
 // turn sets X-Scope-OrgID on the outgoing request.
-func TestExecuteQueryLokiPassesTenantToBackend(t *testing.T) {
+func TestExecuteLokiQueryPassesTenantToBackend(t *testing.T) {
 	t.Parallel()
 
 	var capturedTenant string
@@ -123,7 +123,7 @@ func TestExecuteQueryLokiPassesTenantToBackend(t *testing.T) {
 		"start":  "1h",
 		"tenant": "cloudtrail",
 	}
-	_, err := mcpServer.executeQueryLoki(t.Context(), args)
+	_, err := mcpServer.executeLokiQuery(t.Context(), args)
 	require.NoError(t, err)
 	require.Equal(t, "cloudtrail", capturedTenant)
 }
@@ -181,7 +181,7 @@ func TestGetToolDefinitionsMinimalServer(t *testing.T) {
 	}
 
 	// Loki tools should be present (lokiClient is non-nil)
-	require.True(t, toolMap["query_loki"], "Loki tool should be present when lokiClient is set")
+	require.True(t, toolMap["loki_query"], "Loki tool should be present when lokiClient is set")
 
 	// Utility tools should always be present
 	require.True(t, toolMap["whois_lookup"], "whois_lookup should always be present")

@@ -18,7 +18,7 @@ func TestGetInvestigationTools(t *testing.T) {
 
 	// Expected tool names
 	expectedTools := map[string]bool{
-		ToolQueryLoki:      true,
+		ToolLokiQuery:      true,
 		ToolGetK8sPodLogs:  true,
 		ToolGetK8sResource: true,
 		ToolListK8sPods:    true,

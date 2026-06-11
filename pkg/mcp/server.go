@@ -26,7 +26,7 @@ const (
 
 // Tool name constants.
 const (
-	toolQueryLoki                      = "query_loki"
+	toolLokiQuery                      = "loki_query"
 	toolWhoisLookup                    = "whois_lookup"
 	toolGeneratePDF                    = "generate_pdf"
 	toolGitHubGetFile                  = "github_get_file"
@@ -241,7 +241,7 @@ func getLokiTools(allowedTenants []string) (result []MCPTool) {
 
 	result = []MCPTool{
 		{
-			Name:        toolQueryLoki,
+			Name:        toolLokiQuery,
 			Description: description,
 			InputSchema: map[string]interface{}{
 				"type":       "object",
@@ -903,8 +903,8 @@ func (s *Server) dispatchToolCall(ctx context.Context, toolName string, args map
 	}
 
 	switch toolName {
-	case toolQueryLoki:
-		result, err = s.executeQueryLoki(ctx, args)
+	case toolLokiQuery:
+		result, err = s.executeLokiQuery(ctx, args)
 	case toolWhoisLookup:
 		result, err = s.executeWhoisLookup(ctx, args)
 	case toolGeneratePDF:
@@ -1012,8 +1012,8 @@ func (s *Server) dispatchExtendedToolCall(ctx context.Context, toolName string, 
 	return result, err
 }
 
-// executeQueryLoki executes a Loki query.
-func (s *Server) executeQueryLoki(ctx context.Context, args map[string]interface{}) (result string, err error) {
+// executeLokiQuery executes a Loki query.
+func (s *Server) executeLokiQuery(ctx context.Context, args map[string]interface{}) (result string, err error) {
 	var queryResult k8s.QueryResult
 
 	query, _ := args["query"].(string)

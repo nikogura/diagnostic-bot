@@ -6,7 +6,7 @@ import (
 
 // ToolName constants for Claude tool use.
 const (
-	ToolQueryLoki      = "query_loki"
+	ToolLokiQuery      = "loki_query"
 	ToolGetK8sPodLogs  = "get_k8s_pod_logs"
 	ToolGetK8sResource = "get_k8s_resource"
 	ToolListK8sPods    = "list_k8s_pods"
@@ -20,7 +20,7 @@ const (
 func GetInvestigationTools() (result []anthropic.ToolDefinition) {
 	result = []anthropic.ToolDefinition{
 		{
-			Name:        ToolQueryLoki,
+			Name:        ToolLokiQuery,
 			Description: "Query Loki log aggregation system for ModSecurity WAF logs and other application logs. Use LogQL query syntax. Returns JSON log entries.",
 			InputSchema: map[string]interface{}{
 				"type": "object",

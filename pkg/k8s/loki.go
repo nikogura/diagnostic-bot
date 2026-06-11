@@ -96,7 +96,7 @@ func (l *LokiClient) ConfigureTenants(defaultTenant string, allowedTenants []str
 }
 
 // AllowedTenants returns the configured tenant allowlist in sorted order.
-// The MCP layer injects this list into the query_loki tool description so
+// The MCP layer injects this list into the loki_query tool description so
 // the calling LLM can discover which tenants are queryable.
 func (l *LokiClient) AllowedTenants() (result []string) {
 	result = make([]string, 0, len(l.allowedTenants))

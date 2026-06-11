@@ -123,7 +123,7 @@ func (s *SDKServer) registerLokiTools() {
 	}
 
 	for _, t := range getLokiTools(s.legacy.lokiClient.AllowedTenants()) {
-		s.registerTool(t.Name, t.Description, t.InputSchema, s.legacy.executeQueryLoki)
+		s.registerTool(t.Name, t.Description, t.InputSchema, s.legacy.executeLokiQuery)
 	}
 }
 

@@ -202,7 +202,7 @@ func TestConfigureTenantsAcceptsEmptyAllowlistWithDefault(t *testing.T) {
 }
 
 // TestAllowedTenantsReturnsConfiguredList verifies the accessor used by the
-// MCP layer to inject the allowlist into the query_loki tool description.
+// MCP layer to inject the allowlist into the loki_query tool description.
 func TestAllowedTenantsReturnsConfiguredList(t *testing.T) {
 	client := newTestLokiClient(t, "http://example:3100")
 	err := client.ConfigureTenants("monitoring", []string{"monitoring", "cloudtrail", "self-monitoring"})

@@ -21,7 +21,7 @@ All tools are read-only except the Grafana dashboard-management tools. Each grou
 
 | Group | Tools | Enabled by |
 |-------|-------|------------|
-| Logs (Loki) | `query_loki` | `LOKI_ENDPOINT` |
+| Logs (Loki) | `loki_query` | `LOKI_ENDPOINT` |
 | Logs (CloudWatch) | `cloudwatch_logs_query`, `cloudwatch_logs_list_groups`, `cloudwatch_logs_get_events` | `CLOUDWATCH_ACCOUNTS` or `CLOUDWATCH_ASSUME_ROLE` |
 | Metrics (Prometheus) | `prometheus_query`, `prometheus_query_range`, `prometheus_series`, `prometheus_label_values`, `prometheus_list_endpoints` | `PROMETHEUS_URL` / `PROMETHEUS_<NAME>_URL` |
 | Traces (Tempo) | `tempo_get_trace`, `tempo_search_traces`, `tempo_list_endpoints` | `TEMPO_URL` / `TEMPO_<NAME>_URL` |
