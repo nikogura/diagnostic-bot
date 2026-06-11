@@ -293,6 +293,7 @@ func getUtilityTools() (result []MCPTool) {
 				"required": []string{"markdown_content", "filename"},
 			},
 		},
+		listMyToolsDefinition(),
 	}
 
 	return result
@@ -903,6 +904,8 @@ func (s *Server) dispatchToolCall(ctx context.Context, toolName string, args map
 	}
 
 	switch toolName {
+	case metaToolListMyTools:
+		result, err = s.executeListMyTools(ctx, args)
 	case toolLokiQuery:
 		result, err = s.executeLokiQuery(ctx, args)
 	case toolWhoisLookup:

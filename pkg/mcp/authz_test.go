@@ -15,7 +15,7 @@ authz:
   default: deny
   roles:
     read-only:
-      tools: ["k8s_*"]
+      tools: ["k8s_*", "whois_lookup"]
     security:
       tools: ["ecr_*"]
       via: ["mcp"]
@@ -170,7 +170,8 @@ func TestDenialMessageIsHelpfulAndLeakFree(t *testing.T) {
 	if !strings.Contains(msg, "not allowed to run") {
 		t.Errorf("message should tell the user they're not allowed: %q", msg)
 	}
-	if !strings.Contains(msg, "You currently have access to") || !strings.Contains(msg, "k8s_*") {
+	// The denial lists concrete tools from the actual catalog the caller can run.
+	if !strings.Contains(msg, "You currently have access to") || !strings.Contains(msg, "whois_lookup") {
 		t.Errorf("message should honestly state what they CAN do: %q", msg)
 	}
 	for _, leak := range []string{"read-only", "security", "grafana-write"} {

@@ -115,18 +115,19 @@ func (pol *Policy) Evaluate(p Principal, tool string) (decision Decision) {
 	return decision
 }
 
-// GrantedTools returns the tool-name globs the principal is allowed on its own
-// front-end. It reveals only the requester's own access — never other roles,
-// groups, or what they would need — so it is safe to show in a denial without
-// enumerating the policy.
-func (pol *Policy) GrantedTools(p Principal) (tools []string) {
+// Capabilities partitions the candidate tool names into what the principal can
+// dispatch on its front-end and what its roles grant elsewhere. It shares the
+// assess core with Evaluate, so the "here" set matches dispatch exactly — the
+// single source of truth for list_my_tools, catalog filtering, and denials.
+func (pol *Policy) Capabilities(p Principal, candidates []string) (capability Capability) {
 	cfg := pol.current()
 	if cfg == nil {
-		return tools
+		capability.Elsewhere = map[string][]string{}
+		return capability
 	}
 
-	tools = grantedTools(cfg, p)
-	return tools
+	capability = capabilities(cfg, p, candidates)
+	return capability
 }
 
 // current returns the active config, reloading from disk first if the backing

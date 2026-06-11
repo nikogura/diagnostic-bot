@@ -180,7 +180,7 @@ func TestWriteToolUsageOnlyUtilities(t *testing.T) {
 	config := ToolConfig{} // All false
 
 	var builder strings.Builder
-	config.WriteToolUsage(&builder)
+	config.WriteToolUsage(&builder, nil)
 	output := builder.String()
 
 	// Should always include utility tools
@@ -203,7 +203,7 @@ func TestWriteToolUsageWithLoki(t *testing.T) {
 	config := ToolConfig{LokiAvailable: true}
 
 	var builder strings.Builder
-	config.WriteToolUsage(&builder)
+	config.WriteToolUsage(&builder, nil)
 	output := builder.String()
 
 	assert.Contains(t, output, "loki_query", "Should include Loki tool")
@@ -217,7 +217,7 @@ func TestWriteToolUsageWithCloudWatch(t *testing.T) {
 	config := ToolConfig{CloudWatchAvailable: true}
 
 	var builder strings.Builder
-	config.WriteToolUsage(&builder)
+	config.WriteToolUsage(&builder, nil)
 	output := builder.String()
 
 	assert.Contains(t, output, "cloudwatch_logs_query", "Should include CloudWatch query tool")
@@ -240,7 +240,7 @@ func TestWriteToolUsageAllEnabled(t *testing.T) {
 	}
 
 	var builder strings.Builder
-	config.WriteToolUsage(&builder)
+	config.WriteToolUsage(&builder, nil)
 	output := builder.String()
 
 	// All tool categories should be present
@@ -267,7 +267,7 @@ func TestWriteToolUsageGrafanaMentionsInfinity(t *testing.T) {
 	config := ToolConfig{GrafanaAvailable: true}
 
 	var builder strings.Builder
-	config.WriteToolUsage(&builder)
+	config.WriteToolUsage(&builder, nil)
 	output := builder.String()
 
 	assert.Contains(t, output, "grafana_create_dashboard", "Should include grafana_create_dashboard")

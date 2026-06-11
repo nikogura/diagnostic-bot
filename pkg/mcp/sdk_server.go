@@ -34,7 +34,53 @@ func NewSDKServer(legacy *Server) (result *SDKServer) {
 
 	result.registerTools()
 
+	// Filter the advertised tool list per authenticated caller, so an MCP
+	// client's catalog matches what will actually dispatch for it.
+	mcpServer.AddReceivingMiddleware(result.toolListMiddleware)
+
 	return result
+}
+
+// methodListTools is the MCP method whose advertised tool list is filtered per
+// caller.
+const methodListTools = "tools/list"
+
+// toolListMiddleware is a receiving middleware that trims the advertised tool
+// list to what the authenticated caller may actually dispatch, using the same
+// check enforcement uses (Server.allows). The caller's identity rides in ctx,
+// exactly as it does for dispatch — so the catalog and dispatch can't disagree.
+func (s *SDKServer) toolListMiddleware(next sdkmcp.MethodHandler) (handler sdkmcp.MethodHandler) {
+	handler = func(ctx context.Context, method string, req sdkmcp.Request) (result sdkmcp.Result, err error) {
+		result, err = next(ctx, method, req)
+		if err != nil || method != methodListTools {
+			return result, err
+		}
+
+		result = s.filterAdvertisedTools(ctx, result)
+		return result, err
+	}
+	return handler
+}
+
+// filterAdvertisedTools drops tools the caller behind ctx cannot dispatch from a
+// tools/list result. A non-listing result is returned unchanged.
+func (s *SDKServer) filterAdvertisedTools(ctx context.Context, result sdkmcp.Result) (filtered sdkmcp.Result) {
+	filtered = result
+
+	listing, ok := result.(*sdkmcp.ListToolsResult)
+	if !ok {
+		return filtered
+	}
+
+	kept := make([]*sdkmcp.Tool, 0, len(listing.Tools))
+	for _, tool := range listing.Tools {
+		if s.legacy.allows(ctx, tool.Name) {
+			kept = append(kept, tool)
+		}
+	}
+	listing.Tools = kept
+
+	return filtered
 }
 
 // StreamableHTTPHandler returns an http.Handler for the Streamable HTTP transport.
@@ -129,8 +175,9 @@ func (s *SDKServer) registerLokiTools() {
 
 func (s *SDKServer) registerUtilityTools() {
 	handlers := map[string]func(context.Context, map[string]interface{}) (string, error){
-		toolWhoisLookup: s.legacy.executeWhoisLookup,
-		toolGeneratePDF: s.legacy.executeGeneratePDF,
+		metaToolListMyTools: s.legacy.executeListMyTools,
+		toolWhoisLookup:     s.legacy.executeWhoisLookup,
+		toolGeneratePDF:     s.legacy.executeGeneratePDF,
 	}
 
 	for _, t := range getUtilityTools() {

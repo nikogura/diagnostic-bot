@@ -50,6 +50,16 @@ type Decision struct {
 	Reason  string
 }
 
+// Capability is what a principal can do over a candidate tool set on its current
+// front-end. Here are the tools that actually dispatch; Elsewhere maps a tool
+// the principal's roles grant but that is scoped to another front-end to the
+// front-end(s) it is available on ("available via mcp, not here"). It reflects
+// only the requester's own access — never roles, groups, or what they'd need.
+type Capability struct {
+	Here      []string
+	Elsewhere map[string][]string
+}
+
 // config is the parsed policy document (the body under the top-level `authz:`).
 //
 // Groups maps a group name to roles. Groups come from the verified OIDC/Google
@@ -116,38 +126,69 @@ func validate(cfg *config) (err error) {
 	return err
 }
 
-// evaluate decides whether tool is permitted for p under cfg. Pure: no I/O. On a
-// denial, Reason is a user-facing explanation of *why* (wrong interface, missing
-// role, or unresolved identity) so the bot can tell the requester.
-func evaluate(cfg *config, p Principal, tool string) (decision Decision) {
-	roles := matchedRoles(cfg, p)
-
-	var allowedSources []string // front-ends where a held role WOULD grant this tool
-
-	for _, name := range roles {
+// assess is the single decision core every path shares: for one tool it reports
+// whether the principal may dispatch it on its own front-end, and — when a held
+// role grants it but only on a different front-end — which front-end(s) that is.
+// Dispatch (evaluate), the denial reason, and capability listing all build on
+// this, so the reported and enforced sets cannot drift. Pure: no I/O.
+func assess(cfg *config, p Principal, tool string) (allowed bool, elsewhere []string) {
+	for _, name := range matchedRoles(cfg, p) {
 		r, ok := cfg.Roles[name]
-		if !ok {
-			continue
-		}
-		if !roleGrantsTool(r, tool) {
+		if !ok || !roleGrantsTool(r, tool) {
 			continue
 		}
 		if sourceAllowed(r.Via, p.Source) {
-			decision = Decision{Allowed: true, Reason: "granted by role " + name}
-			return decision
+			allowed = true
+			return allowed, elsewhere
 		}
 		// A held role grants the tool, but not on this front-end — remember
-		// where it would, so the denial can point the user at the right place.
-		allowedSources = append(allowedSources, r.Via...)
+		// where it would, so callers can point the user at the right place.
+		elsewhere = append(elsewhere, r.Via...)
 	}
 
 	if strings.EqualFold(cfg.Default, defaultAllow) {
-		decision = Decision{Allowed: true, Reason: "allowed by the default policy"}
+		allowed = true
+		return allowed, elsewhere
+	}
+
+	elsewhere = dedupe(elsewhere)
+	return allowed, elsewhere
+}
+
+// evaluate decides whether tool is permitted for p under cfg. On a denial,
+// Reason is a user-facing explanation of *why* (wrong interface, missing role,
+// or unresolved identity) so the bot can tell the requester.
+func evaluate(cfg *config, p Principal, tool string) (decision Decision) {
+	allowed, elsewhere := assess(cfg, p, tool)
+	if allowed {
+		decision = Decision{Allowed: true, Reason: "granted by a matching role"}
 		return decision
 	}
 
-	decision = Decision{Allowed: false, Reason: denyReason(p, allowedSources)}
+	decision = Decision{Allowed: false, Reason: denyReason(p, elsewhere)}
 	return decision
+}
+
+// capabilities partitions a candidate tool set for a principal: Here lists the
+// tools that dispatch on the principal's front-end; Elsewhere maps a tool the
+// principal's roles grant but that is scoped to another front-end to where it
+// is available. It shares assess with dispatch, so Here matches dispatch exactly.
+func capabilities(cfg *config, p Principal, candidates []string) (capability Capability) {
+	capability.Elsewhere = make(map[string][]string)
+
+	for _, tool := range candidates {
+		allowed, elsewhere := assess(cfg, p, tool)
+		if allowed {
+			capability.Here = append(capability.Here, tool)
+			continue
+		}
+		if len(elsewhere) > 0 {
+			capability.Elsewhere[tool] = elsewhere
+		}
+	}
+
+	sort.Strings(capability.Here)
+	return capability
 }
 
 // roleGrantsTool reports whether any of the role's tool globs match tool.
@@ -180,31 +221,6 @@ func denyReason(p Principal, allowedSources []string) (reason string) {
 
 	reason = "your role does not grant access to this tool"
 	return reason
-}
-
-// grantedTools returns the sorted, de-duplicated tool-name globs the principal
-// is granted on its own front-end. It reflects only the requester's own access
-// — never other roles, groups, or what they would need — so it is safe to show
-// in a denial ("here is what you can do") without enumerating the policy.
-func grantedTools(cfg *config, p Principal) (tools []string) {
-	seen := make(map[string]bool)
-
-	for _, name := range matchedRoles(cfg, p) {
-		r, ok := cfg.Roles[name]
-		if !ok || !sourceAllowed(r.Via, p.Source) {
-			continue
-		}
-		for _, pattern := range r.Tools {
-			if seen[pattern] {
-				continue
-			}
-			seen[pattern] = true
-			tools = append(tools, pattern)
-		}
-	}
-
-	sort.Strings(tools)
-	return tools
 }
 
 // dedupe returns the input with duplicates removed, preserving order.

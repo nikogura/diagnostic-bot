@@ -119,29 +119,36 @@ func TestDenyReasonsAreActionableAndLeakFree(t *testing.T) {
 	}
 }
 
-func TestGrantedTools(t *testing.T) {
+func TestCapabilities(t *testing.T) {
 	t.Parallel()
 
 	cfg := testConfig()
-
-	// alice (read-only + platform) over MCP gets the union of those roles' tools.
-	alice := grantedTools(cfg, Principal{Email: "alice@corp.com", Source: SourceMCP})
-	for _, want := range []string{"k8s_*", "prometheus_*", "ec2_describe_*", "cloudwatch_*"} {
-		if !slices.Contains(alice, want) {
-			t.Errorf("alice's granted tools missing %q: %v", want, alice)
-		}
-	}
-	// ...and nothing she has no role for.
-	for _, leaked := range []string{"grafana_*", "*"} {
-		if slices.Contains(alice, leaked) {
-			t.Errorf("grantedTools leaked %q alice has no role for: %v", leaked, alice)
-		}
+	candidates := []string{
+		"k8s_get_resource", "prometheus_query", "ec2_describe_vpcs",
+		"cloudwatch_logs_query", "grafana_create_dashboard", "ecr_scan_results",
 	}
 
-	// carol's only role (grafana-write) is via:mcp, so over Slack she gets nothing.
-	carolSlack := grantedTools(cfg, Principal{SlackID: "U02CAROL", Source: SourceSlack})
-	if len(carolSlack) != 0 {
-		t.Errorf("carol over Slack should have no granted tools (grafana-write is via:mcp), got %v", carolSlack)
+	// alice (read-only + platform) over MCP: concrete tools she can dispatch.
+	alice := capabilities(cfg, Principal{Email: "alice@corp.com", Source: SourceMCP}, candidates)
+	for _, want := range []string{"k8s_get_resource", "prometheus_query", "ec2_describe_vpcs", "cloudwatch_logs_query"} {
+		if !slices.Contains(alice.Here, want) {
+			t.Errorf("alice should be able to run %q: %v", want, alice.Here)
+		}
+	}
+	for _, no := range []string{"grafana_create_dashboard", "ecr_scan_results"} {
+		if slices.Contains(alice.Here, no) {
+			t.Errorf("alice should NOT be able to run %q: %v", no, alice.Here)
+		}
+	}
+
+	// carol's grafana-write is via:mcp. Over Slack the tool isn't "here" but is
+	// reported as available elsewhere (mcp) — honest, and names no role/group.
+	carolSlack := capabilities(cfg, Principal{SlackID: "U02CAROL", Source: SourceSlack}, candidates)
+	if slices.Contains(carolSlack.Here, "grafana_create_dashboard") {
+		t.Errorf("carol over Slack should not have grafana_create_dashboard here: %v", carolSlack.Here)
+	}
+	if got := carolSlack.Elsewhere["grafana_create_dashboard"]; !slices.Contains(got, SourceMCP) {
+		t.Errorf("grafana_create_dashboard should be flagged available via mcp, got %v", got)
 	}
 }
 

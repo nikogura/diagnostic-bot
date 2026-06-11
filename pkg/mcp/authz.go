@@ -6,12 +6,19 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
+	"slices"
+	"sort"
 	"strings"
 
 	"github.com/nikogura/diagnostic-bot/pkg/authz"
 	"github.com/nikogura/diagnostic-bot/pkg/mcp/auth"
 	"github.com/nikogura/diagnostic-bot/pkg/metrics"
 )
+
+// metaToolListMyTools is always permitted: a caller must be able to ask what
+// they can do even under a default-deny policy. It reveals only the caller's own
+// access, so it is never gated.
+const metaToolListMyTools = "list_my_tools"
 
 // Environment variables that configure tool authorization. With neither set,
 // authorization is disabled and every front-end gets the full tool surface
@@ -71,9 +78,10 @@ func (s *Server) principalFromContext(ctx context.Context) (p authz.Principal) {
 
 // authorize enforces the tool-access policy for the principal behind ctx,
 // returning a non-nil error when the tool is denied. It is a no-op when no
-// policy is configured. Every decision is metered; denials are logged.
+// policy is configured, and always permits the list_my_tools meta-tool. Every
+// decision is metered; denials are logged.
 func (s *Server) authorize(ctx context.Context, tool string) (err error) {
-	if s.authorizer == nil {
+	if s.authorizer == nil || tool == metaToolListMyTools {
 		return err
 	}
 
@@ -104,11 +112,78 @@ func (s *Server) authorize(ctx context.Context, tool string) (err error) {
 	// path it returns as a tool error the model relays to the user.
 	msg := fmt.Sprintf("permission denied: you are not allowed to run %q — %s", tool, decision.Reason)
 
-	granted := s.authorizer.GrantedTools(p)
-	if len(granted) > 0 {
-		msg = fmt.Sprintf("%s. You currently have access to: %s", msg, strings.Join(granted, ", "))
+	capability := s.capabilities(ctx)
+	if len(capability.Here) > 0 {
+		msg = fmt.Sprintf("%s. You currently have access to: %s", msg, strings.Join(capability.Here, ", "))
 	}
 
 	err = errors.New(msg)
 	return err
+}
+
+// allows reports whether the principal behind ctx may dispatch tool, with no
+// logging or metrics — for capability listing and catalog filtering, which must
+// not emit deny audit events. It shares Evaluate with authorize, so it agrees
+// with dispatch. The list_my_tools meta-tool is always allowed.
+func (s *Server) allows(ctx context.Context, tool string) (ok bool) {
+	if s.authorizer == nil || tool == metaToolListMyTools {
+		ok = true
+		return ok
+	}
+
+	ok = s.authorizer.Evaluate(s.principalFromContext(ctx), tool).Allowed
+	return ok
+}
+
+// toolNames returns the names of every currently-advertised tool.
+func (s *Server) toolNames() (names []string) {
+	tools := s.ToolDefinitions()
+	names = make([]string, 0, len(tools))
+	for _, t := range tools {
+		names = append(names, t.Name)
+	}
+	return names
+}
+
+// capabilities reports what the principal behind ctx can do: the tools that
+// dispatch here, and those their roles grant only on another front-end. It is
+// the shared source of truth for list_my_tools, the denial message, and catalog
+// filtering. With no policy configured, every advertised tool is available.
+func (s *Server) capabilities(ctx context.Context) (capability authz.Capability) {
+	names := s.toolNames()
+
+	if s.authorizer == nil {
+		capability.Here = names
+		capability.Elsewhere = map[string][]string{}
+		sort.Strings(capability.Here)
+		return capability
+	}
+
+	capability = s.authorizer.Capabilities(s.principalFromContext(ctx), names)
+
+	// list_my_tools is always available; ensure it shows in the usable set.
+	if slices.Contains(names, metaToolListMyTools) && !slices.Contains(capability.Here, metaToolListMyTools) {
+		capability.Here = append(capability.Here, metaToolListMyTools)
+		sort.Strings(capability.Here)
+	}
+
+	return capability
+}
+
+// AllowedTools returns the subset of tools the principal behind ctx may actually
+// dispatch — filtered by the same check dispatch uses, so the advertised set
+// matches enforcement. With no policy configured it returns tools unchanged.
+func (s *Server) AllowedTools(ctx context.Context, tools []MCPTool) (allowed []MCPTool) {
+	if s.authorizer == nil {
+		allowed = tools
+		return allowed
+	}
+
+	allowed = make([]MCPTool, 0, len(tools))
+	for _, t := range tools {
+		if s.allows(ctx, t.Name) {
+			allowed = append(allowed, t)
+		}
+	}
+	return allowed
 }

@@ -55,6 +55,13 @@ func (f *fakeDispatcher) ToolDefinitions() (tools []mcp.MCPTool) {
 	return tools
 }
 
+// AllowedTools returns the tools unchanged: the fake has no policy, so the agent
+// sees the full catalog (authorization is exercised in pkg/mcp tests).
+func (f *fakeDispatcher) AllowedTools(_ context.Context, tools []mcp.MCPTool) (allowed []mcp.MCPTool) {
+	allowed = tools
+	return allowed
+}
+
 func (f *fakeDispatcher) DispatchTool(_ context.Context, name string, _ map[string]any) (result string, err error) {
 	f.calls = append(f.calls, name)
 
@@ -334,10 +341,10 @@ func TestBuildSystemPromptTextOnlyWhenPDFDisabled(t *testing.T) {
 
 	runner := &InvestigationRunner{toolUsage: ToolConfig{}, logger: testLogger()}
 
-	enabled := runner.buildSystemPrompt(testSkill(), true)
+	enabled := runner.buildSystemPrompt(testSkill(), true, nil)
 	assert.Contains(t, enabled, "ALWAYS generate a PDF")
 
-	disabled := runner.buildSystemPrompt(testSkill(), false)
+	disabled := runner.buildSystemPrompt(testSkill(), false, nil)
 	assert.NotContains(t, disabled, "ALWAYS generate a PDF")
 	assert.Contains(t, disabled, "Do NOT generate a PDF")
 }
@@ -350,7 +357,7 @@ func TestBuildSystemPromptGatesToolsByConfig(t *testing.T) {
 		logger:    testLogger(),
 	}
 
-	prompt := runner.buildSystemPrompt(testSkill(), true)
+	prompt := runner.buildSystemPrompt(testSkill(), true, nil)
 
 	assert.Contains(t, prompt, "# Investigation Task")
 	assert.Contains(t, prompt, "Investigate the issue.")
@@ -359,6 +366,25 @@ func TestBuildSystemPromptGatesToolsByConfig(t *testing.T) {
 	assert.NotContains(t, prompt, "cloudwatch_logs_query", "CloudWatch omitted when not configured")
 	assert.Contains(t, prompt, "# IMPORTANT: PDF Generation")
 	assert.Contains(t, prompt, "UNTRUSTED DATA", "data-handling boundary must be present")
+}
+
+func TestBuildSystemPromptFiltersProseByAllowedCatalog(t *testing.T) {
+	t.Parallel()
+
+	runner := &InvestigationRunner{
+		// Both backends configured, so without authz both sections would appear.
+		toolUsage: ToolConfig{LokiAvailable: true, GrafanaAvailable: true},
+		logger:    testLogger(),
+	}
+
+	// Caller may use Loki but not Grafana: a non-nil catalog omitting grafana.
+	catalog := []mcp.MCPTool{{Name: "loki_query"}, {Name: "whois_lookup"}, {Name: "list_my_tools"}}
+
+	prompt := runner.buildSystemPrompt(testSkill(), false, catalog)
+
+	assert.Contains(t, prompt, "loki_query", "allowed tool is described")
+	assert.NotContains(t, prompt, "grafana_list_dashboards", "a tool the caller can't dispatch must not be described")
+	assert.NotContains(t, prompt, "**Grafana:**", "an entirely-denied section is omitted")
 }
 
 // ensure the concrete types satisfy the interfaces the loop depends on.

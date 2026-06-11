@@ -34,7 +34,7 @@ All tools are read-only except the Grafana dashboard-management tools. Each grou
 | AWS (read) | `sts_get_caller_identity`, `iam_list_roles`, `iam_get_role`, `ec2_describe_vpcs`, `ec2_describe_subnets`, `ec2_describe_security_groups`, `ec2_describe_nat_gateways`, `route53_list_hosted_zones`, `route53_list_records`, `s3_list_buckets`, `s3_get_bucket_policy` | AWS credentials |
 | Container scans (ECR) | `ecr_scan_results` | `AWS_REGION` / `AWS_DEFAULT_REGION` |
 | GraphQL | `graphql_query`, `graphql_list_endpoints` | `GRAPHQL_URL` / `GRAPHQL_<NAME>_URL` |
-| Utility | `whois_lookup`, `generate_pdf` | always available |
+| Utility | `whois_lookup`, `generate_pdf`, `list_my_tools` | always available |
 | Third-party APIs | generated per YAML config | `API_CONFIG_DIR` |
 
 Database access is restricted to read-only statements. The Kubernetes tools are read-only (`get`/`list`) and target only the cluster the bot runs in (or the one named by `KUBECONFIG`); they cannot read Secrets — `secret` is excluded from the resource allowlist, the supplied RBAC withholds the `secrets` verb, and all output is secret-scrubbed. Setting `READ_ONLY=true` removes every write tool from the toolset and rejects any write call at dispatch.
@@ -159,6 +159,8 @@ Authentication answers *can you use the bot at all*. Authorization answers *whic
 This is application-layer filtering: the bot's own credentials are unchanged — the policy only decides which of the bot's tools a given requester may call. Enforcement is server-side, at the single dispatch boundary each front-end shares, not advisory to the model. A configured-but-unparseable policy **fails closed** (deny all) so a broken file never silently disables authorization.
 
 When a request is denied, the requester is told — on Slack and on the MCP client alike — that they're not allowed and **why** (wrong interface, no granting role, or unresolved identity), along with **what they can** run. Denials deliberately never name roles or groups, so the message can't be used to enumerate the policy.
+
+Capability reporting is per-caller and per-interface, and matches dispatch exactly. The `list_my_tools` tool (always available) is the authoritative "what can I do?" answer — it lists only the tools that would actually dispatch for *this* caller on *this* front-end, and labels any tools that are available only on the other interface ("available via mcp, not here"). The same allowed-set also filters the model's callable catalog and the system-prompt tool descriptions on Slack, and the advertised `tools/list` on MCP — so the bot never describes, offers, or advertises a tool the caller can't use. `list_my_tools`, the catalog filter, and the denial message all share one decision core, so they cannot disagree with enforcement.
 
 Each front-end is matched by its **hardened identifier**: the MCP HTTP path matches by the **email** (and `groups`) from the verified OIDC/Google token; the Slack path matches by the user's **immutable Slack user ID** (`U…`), never the user-editable profile email. A `users[]` entry lists both so the same person is recognized on both front-ends. Roles are **additive** — a requester holds the union of every role bound to their identifiers and groups — and anything no held role grants falls to the configured `default` (`deny` or `allow`).
 

@@ -44,6 +44,10 @@ type ModelClient interface {
 // *mcp.Server (the same brain the MCP transports use); faked in tests.
 type ToolDispatcher interface {
 	ToolDefinitions() (tools []mcp.MCPTool)
+	// AllowedTools filters tools to those the caller behind ctx may actually
+	// dispatch, using the same check enforcement uses — so the catalog the model
+	// sees, the prose it describes, and what will dispatch can't disagree.
+	AllowedTools(ctx context.Context, tools []mcp.MCPTool) (allowed []mcp.MCPTool)
 	DispatchTool(ctx context.Context, name string, args map[string]any) (result string, err error)
 }
 
@@ -95,8 +99,13 @@ func (r *InvestigationRunner) RunInvestigation(ctx context.Context, skill *inves
 	metrics.AddInvestigationInFlight(ctx, 1)
 	defer metrics.AddInvestigationInFlight(ctx, -1)
 
-	systemPrompt := r.buildSystemPrompt(skill, pdfEnabled)
-	toolDefs := convertToolDefinitions(filterPDFTool(r.tools.ToolDefinitions(), pdfEnabled))
+	// The catalog the model is given is filtered to what the caller may actually
+	// dispatch (authz + read-only) and whether PDFs are enabled. The same set
+	// drives the system-prompt tool descriptions, so the model never learns about
+	// or attempts a tool it can't use.
+	catalog := filterPDFTool(r.tools.AllowedTools(ctx, r.tools.ToolDefinitions()), pdfEnabled)
+	systemPrompt := r.buildSystemPrompt(skill, pdfEnabled, catalog)
+	toolDefs := convertToolDefinitions(catalog)
 	messages := claude.AppendUserMessage(nil, userMessage)
 
 	r.logger.InfoContext(ctx, "starting in-process investigation",
@@ -307,14 +316,25 @@ func observeInvestigation(ctx context.Context, skillName string, start time.Time
 // buildSystemPrompt assembles the system prompt: the investigation skill, the
 // available-tool guidance, the output/PDF requirements, and the untrusted-data
 // boundary the model must respect.
-func (r *InvestigationRunner) buildSystemPrompt(skill *investigations.InvestigationSkill, pdfEnabled bool) (result string) {
+func (r *InvestigationRunner) buildSystemPrompt(skill *investigations.InvestigationSkill, pdfEnabled bool, catalog []mcp.MCPTool) (result string) {
 	var builder strings.Builder
+
+	// The tool prose is filtered to exactly the catalog the model is given, so
+	// "what can you do?" answers can't list tools this caller can't dispatch. A
+	// nil catalog means no filtering (authorization disabled).
+	var allowed map[string]bool
+	if catalog != nil {
+		allowed = make(map[string]bool, len(catalog))
+		for _, tool := range catalog {
+			allowed[tool.Name] = true
+		}
+	}
 
 	builder.WriteString("# Investigation Task\n\n")
 	builder.WriteString(skill.InitialPrompt)
 	builder.WriteString("\n\n")
 
-	r.toolUsage.WriteToolUsage(&builder)
+	r.toolUsage.WriteToolUsage(&builder, allowed)
 
 	builder.WriteString("# Output Format\n\n")
 	builder.WriteString("Provide your investigation findings in a clear, structured format:\n")

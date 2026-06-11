@@ -133,15 +133,16 @@ func TestGetUtilityTools(t *testing.T) {
 
 	tools := getUtilityTools()
 
-	// Should have 2 utility tools
-	expectedCount := 2
+	// Should have 3 utility tools (whois, generate_pdf, list_my_tools)
+	expectedCount := 3
 	if len(tools) != expectedCount {
 		t.Fatalf("getUtilityTools() returned %d tools, want %d", len(tools), expectedCount)
 	}
 
 	expectedTools := map[string]bool{
-		"whois_lookup": false,
-		"generate_pdf": false,
+		"whois_lookup":  false,
+		"generate_pdf":  false,
+		"list_my_tools": false,
 	}
 
 	for _, tool := range tools {
@@ -342,7 +343,8 @@ func TestGetToolDefinitionsUtilityToolsAlwaysPresent(t *testing.T) {
 
 	require.True(t, toolMap["whois_lookup"], "whois_lookup should always be present")
 	require.True(t, toolMap["generate_pdf"], "generate_pdf should always be present")
-	require.Len(t, tools, 2, "Only utility tools should be present when nothing is configured")
+	require.True(t, toolMap["list_my_tools"], "list_my_tools should always be present")
+	require.Len(t, tools, 3, "Only utility tools should be present when nothing is configured")
 }
 
 func TestExecuteGitHubGetFileWithoutToken(t *testing.T) {
