@@ -152,7 +152,7 @@
       "description": "Tool dispatch rate split by success and error.",
       "id": 9,
       "datasource": { "type": "prometheus", "uid": "${prometheus}" },
-      "gridPos": { "h": 8, "w": 8, "x": 0, "y": 16 },
+      "gridPos": { "h": 8, "w": 6, "x": 0, "y": 16 },
       "fieldConfig": { "defaults": { "unit": "reqps", "custom": { "drawStyle": "line", "fillOpacity": 10 } }, "overrides": [] },
       "targets": [ { "refId": "A", "expr": "sum by (status) (rate(tool_executions_total[5m]))", "legendFormat": "{{status}}" } ]
     },
@@ -162,7 +162,7 @@
       "description": "Most-used tools over the window.",
       "id": 10,
       "datasource": { "type": "prometheus", "uid": "${prometheus}" },
-      "gridPos": { "h": 8, "w": 8, "x": 8, "y": 16 },
+      "gridPos": { "h": 8, "w": 6, "x": 6, "y": 16 },
       "fieldConfig": { "defaults": { "unit": "reqps", "custom": { "drawStyle": "line", "fillOpacity": 10 } }, "overrides": [] },
       "targets": [ { "refId": "A", "expr": "topk(10, sum by (tool_name) (rate(tool_executions_total[5m])))", "legendFormat": "{{tool_name}}" } ]
     },
@@ -172,11 +172,23 @@
       "description": "Claude API call rate by status and token throughput by type.",
       "id": 11,
       "datasource": { "type": "prometheus", "uid": "${prometheus}" },
-      "gridPos": { "h": 8, "w": 8, "x": 16, "y": 16 },
+      "gridPos": { "h": 8, "w": 6, "x": 12, "y": 16 },
       "fieldConfig": { "defaults": { "unit": "short", "custom": { "drawStyle": "line", "fillOpacity": 10 } }, "overrides": [] },
       "targets": [
         { "refId": "A", "expr": "sum by (status) (rate(claude_api_calls_total[5m]))", "legendFormat": "calls {{status}}" },
         { "refId": "B", "expr": "sum by (token_type) (rate(claude_api_tokens_total[5m]))", "legendFormat": "tokens {{token_type}}" }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "Authorization Decisions",
+      "description": "Tool-authorization outcomes by source. A sustained deny rate means callers are hitting role boundaries — a misconfigured policy, or someone reaching for tools they aren't granted.",
+      "id": 23,
+      "datasource": { "type": "prometheus", "uid": "${prometheus}" },
+      "gridPos": { "h": 8, "w": 6, "x": 18, "y": 16 },
+      "fieldConfig": { "defaults": { "unit": "short", "custom": { "drawStyle": "bars", "fillOpacity": 50, "stacking": { "mode": "normal" } } }, "overrides": [] },
+      "targets": [
+        { "refId": "A", "expr": "sum by (decision, source) (rate(authz_decisions_total[5m]))", "legendFormat": "{{decision}} ({{source}})" }
       ]
     },
     {

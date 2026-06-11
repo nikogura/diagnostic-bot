@@ -1,0 +1,100 @@
+# Example role-based tool-authorization policy for diagnostic-bot.
+#
+# Point the bot at this file with MCP_AUTHZ_FILE=/etc/diagnostic-bot/authz.yaml
+# (or pass the same YAML inline via MCP_AUTHZ). With neither set, authorization
+# is disabled and every caller gets the full tool surface.
+#
+# Model:
+#   - Identity is the requester's email (OIDC/Google on the MCP path; resolved
+#     from the Slack profile on the Slack path).
+#   - Roles are additive: a requester holds the union of every role bound to
+#     their emails and groups.
+#   - A role grants tool-name globs ("*", "prefix_*", or an exact name),
+#     optionally scoped to a front-end via `via` (slack | mcp). Omit `via` to
+#     apply everywhere.
+#   - Anything no held role grants falls to `default` (deny | allow).
+#
+# The file is hot-reloaded on change; a parse error on reload keeps the last
+# good policy. A policy that fails to load at startup fails closed (deny all).
+authz:
+  default: deny
+
+  roles:
+    # Read-only diagnostics — safe on both Slack and MCP.
+    read-only:
+      tools:
+        - "k8s_*"
+        - "loki_*"
+        - "prometheus_*"
+        - "tempo_*"
+        - "cloudwatch_*"
+        - "whois_lookup"
+
+    # Platform engineers: read-only plus AWS network/describe reads.
+    platform:
+      tools:
+        - "k8s_*"
+        - "ec2_describe_*"
+        - "cloudwatch_*"
+        - "prometheus_*"
+        - "loki_*"
+
+    # Grafana dashboard reads (view-only).
+    grafana-read:
+      tools:
+        - "grafana_get_*"
+        - "grafana_list_*"
+
+    # Grafana dashboard/folder CRUD. Mutations are restricted to authenticated
+    # MCP so they are never triggered by a message in a shared Slack channel.
+    grafana-write:
+      tools:
+        - "grafana_*"
+      via:
+        - "mcp"
+
+    # Security engineers: vulnerability and identity reads, MCP-only so the
+    # output is never broadcast into a Slack channel.
+    security:
+      tools:
+        - "ecr_*"
+        - "iam_*"
+        - "sts_*"
+      via:
+        - "mcp"
+
+  users:
+    # `name` is for human readability only — it is not used in matching.
+    # `emails` identify the user on the MCP path (verified OIDC/Google token).
+    # `slack_ids` identify the user on the Slack path — the immutable Slack user
+    # ID (Profile → More → Copy member ID), NOT the editable profile email, so a
+    # user cannot escalate by changing their email. List both to be recognized on
+    # both front-ends.
+    - name: "Alice Example"
+      emails:
+        - "alice@example.com"
+        - "alice@contractor.example.com"
+      slack_ids:
+        - "U01ALICE000"
+      roles:
+        - "platform"
+        - "security"
+    - name: "Bob Example"
+      emails:
+        - "bob@example.com"
+      slack_ids:
+        - "U02BOB00000"
+      roles:
+        - "read-only"
+        - "grafana-read"
+
+  # Optional: map OIDC/Google groups to roles (in addition to per-user mapping).
+  # Groups come from the verified OIDC/Google token, so they apply on the MCP
+  # path ONLY. Slack principals carry no groups — grant Slack access via each
+  # user's slack_ids above, not here.
+  groups:
+    sre-team:
+      - "platform"
+      - "grafana-write"
+    sec-team:
+      - "security"

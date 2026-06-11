@@ -101,6 +101,8 @@ All configuration is via environment variables.
 | `MCP_PUBLIC_URL` | — | Externally reachable base URL (required for Google OAuth) |
 | `MCP_AUDIT_USER` | OS user | Identity stamped on Grafana writes |
 | `MCP_MAX_TOOL_OUTPUT_BYTES` | `1000000` | Cap on a single tool result returned to any caller; oversized output is truncated with a notice |
+| `MCP_AUTHZ_FILE` | — | Path to a YAML role-based tool-authorization policy (hot-reloaded). See [Tool Authorization](#tool-authorization-rbac). Unset = disabled (all tools available to all callers) |
+| `MCP_AUTHZ` | — | Inline YAML policy, as an alternative to `MCP_AUTHZ_FILE` (the file wins if both are set) |
 
 ### Observability
 
@@ -150,6 +152,57 @@ The MCP HTTP endpoint is unauthenticated by default (intended for VPC-internal u
 
 For OIDC and Google, the allowlist variables restrict access by group, hosted domain, and email. The `_FILE` variants read the allowlist from a file (typically a mounted ConfigMap), re-read per request with an mtime cache, so edits take effect without a restart.
 
+## Tool Authorization (RBAC)
+
+Authentication answers *can you use the bot at all*. Authorization answers *which tools you may invoke*. With a policy configured (`MCP_AUTHZ_FILE` or `MCP_AUTHZ`), each tool call is checked against the requester's role before it runs; with neither set, authorization is disabled and every caller gets the full tool surface (backward compatible).
+
+This is application-layer filtering: the bot's own credentials are unchanged — the policy only decides which of the bot's tools a given requester may call. Enforcement is server-side, at the single dispatch boundary each front-end shares, not advisory to the model. A configured-but-unparseable policy **fails closed** (deny all) so a broken file never silently disables authorization.
+
+When a request is denied, the requester is told — on Slack and on the MCP client alike — that they're not allowed and **why** (wrong interface, no granting role, or unresolved identity), along with **what they can** run. Denials deliberately never name roles or groups, so the message can't be used to enumerate the policy.
+
+Each front-end is matched by its **hardened identifier**: the MCP HTTP path matches by the **email** (and `groups`) from the verified OIDC/Google token; the Slack path matches by the user's **immutable Slack user ID** (`U…`), never the user-editable profile email. A `users[]` entry lists both so the same person is recognized on both front-ends. Roles are **additive** — a requester holds the union of every role bound to their identifiers and groups — and anything no held role grants falls to the configured `default` (`deny` or `allow`).
+
+```yaml
+authz:
+  default: deny                 # deny | allow — outcome when no role grants the tool
+  roles:
+    read-only:
+      tools: ["k8s_*", "loki_*", "prometheus_*", "cloudwatch_*"]   # prefix globs or exact names
+      # via omitted → applies on both Slack and MCP
+    platform:
+      tools: ["k8s_*", "ec2_describe_*", "cloudwatch_*"]
+    grafana-read:
+      tools: ["grafana_get_*", "grafana_list_*"]
+    grafana-write:                # dashboard/folder CRUD
+      tools: ["grafana_*"]
+      via: ["mcp"]                # mutations only over authenticated MCP, never broadcast to a Slack channel
+    security:
+      tools: ["ecr_*", "iam_*", "sts_*"]
+      via: ["mcp"]
+  users:
+    - name: "Alice"                                         # for readability only; not used in matching
+      emails: ["alice@corp.com", "alice@contractor.com"]    # MCP identity (verified token)
+      slack_ids: ["U01ALICE"]                               # Slack identity (immutable user ID)
+      roles: ["security", "platform"]                       # additive: union of both roles' grants
+    - name: "Bob"
+      emails: ["bob@corp.com"]
+      slack_ids: ["U02BOB"]
+      roles: ["read-only"]
+  groups:                         # optional: OIDC/Google group → roles.
+                                  # MCP path only — Slack principals carry no
+                                  # groups, so use slack_ids for Slack access.
+    sre-team: ["platform"]
+    sec-team: ["security"]
+```
+
+Tool patterns are simple globs: `*` (any tool), `prefix_*` (prefix match), or an exact tool name. A role's `via` restricts where its grants apply (`slack`, `mcp`); omit it to apply everywhere. The policy file is re-read on change (mtime-cached), so edits take effect without a restart; a parse error on reload keeps the last good policy.
+
+**Channel egress is the requester's responsibility, by design.** Authorization is on *who asks*, not *who can see the Slack thread* — if a privileged user invokes a permitted tool in an open channel, the result lands in that channel. Scope sensitive tools to `via: ["mcp"]` (a private, authenticated 1:1 transport) when broadcasting their output would be unacceptable.
+
+**Trust assumptions (Slack vs MCP).** The two front-ends do not have equal identity assurance. The MCP path verifies a cryptographically signed, audience-bound OIDC/Google token. The Slack path trusts that Slack vouches for the user behind a Slack user ID. Binding Slack to the **immutable user ID** (not the editable email) means a user cannot escalate by changing their email — but it still rests on your workspace's account integrity (ideally SSO/SCIM-provisioned). Because Slack assurance is inherently weaker, **scope your most sensitive roles to `via: ["mcp"]`** so they can only be exercised over the authenticated MCP transport. Slack principals also carry no `groups`, so group-to-role mappings never apply on the Slack path.
+
+An example policy ships at [`examples/authz.yaml`](examples/authz.yaml). Every decision is recorded on the `authz_decisions_total` metric (`decision`, `source`) and surfaced on the dashboard; denials are logged.
+
 ## Observability
 
 Instrumentation is OpenTelemetry: metrics are exported in Prometheus format, traces over OTLP, and logs are JSON with trace correlation. The metrics and health server listens on `METRICS_PORT` (default `:9090`), separate from the MCP HTTP port.
@@ -171,10 +224,12 @@ Metrics:
 | `k8s_queries_total` | counter | `namespace`, `resource_type` |
 | `loki_queries_total` | counter | `status` |
 | `conversations_active` | gauge | — |
+| `authz_decisions_total` | counter | `decision`, `source` |
+| `panics_recovered_total` | counter | `site` |
 
 Traces cover the investigation path and each tool call (`investigation`, `tool.<name>`), with W3C trace-context propagation, exported via OTLP when `OTEL_EXPORTER_OTLP_ENDPOINT` is set. Logs are emitted as JSON and carry `trace_id`/`span_id` when a span is active.
 
-A Grafana dashboard is provided at [`dashboards/diagnostic-bot.json`](dashboards/diagnostic-bot.json). It uses `${prometheus}`/`${loki}`/`${tempo}` datasource variables (no hardcoded UIDs) and includes traffic, error, latency, and saturation panels, a logs panel, a traces panel, and Kubernetes resource panels (CPU and memory as a percentage of both request and limit, plus CPU throttling). Import it with whatever dashboard provisioning you use. `make dashboard-check` validates it is well-formed JSON.
+A Grafana dashboard is provided at [`dashboards/diagnostic-bot.json`](dashboards/diagnostic-bot.json). It uses `${prometheus}`/`${loki}`/`${tempo}` datasource variables (no hardcoded UIDs) and includes traffic, error, latency, and saturation panels, an authorization-decisions panel, a logs panel, a traces panel, and Kubernetes resource panels (CPU and memory as a percentage of both request and limit, plus CPU throttling). Import it with whatever dashboard provisioning you use. `make dashboard-check` validates it is well-formed JSON.
 
 ## Deployment
 

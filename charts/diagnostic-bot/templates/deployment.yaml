@@ -59,10 +59,20 @@ spec:
             - name: {{ $key }}
               value: {{ $value | quote }}
             {{- end }}
+            {{- if or .Values.authz.policy .Values.authz.existingConfigMap }}
+            - name: MCP_AUTHZ_FILE
+              value: {{ printf "%s/%s" .Values.authz.mountPath .Values.authz.key | quote }}
+            {{- end }}
           {{- if .Values.existingSecret }}
           envFrom:
             - secretRef:
                 name: {{ .Values.existingSecret }}
+          {{- end }}
+          {{- if or .Values.authz.policy .Values.authz.existingConfigMap }}
+          volumeMounts:
+            - name: authz-policy
+              mountPath: {{ .Values.authz.mountPath | quote }}
+              readOnly: true
           {{- end }}
           livenessProbe:
             httpGet:
@@ -78,6 +88,12 @@ spec:
             periodSeconds: 15
           resources:
             {{- toYaml .Values.resources | nindent 12 }}
+      {{- if or .Values.authz.policy .Values.authz.existingConfigMap }}
+      volumes:
+        - name: authz-policy
+          configMap:
+            name: {{ .Values.authz.existingConfigMap | default (printf "%s-authz" (include "diagnostic-bot.fullname" .)) }}
+      {{- end }}
       {{- with .Values.nodeSelector }}
       nodeSelector:
         {{- toYaml . | nindent 8 }}

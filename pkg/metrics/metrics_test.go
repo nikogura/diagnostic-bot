@@ -47,6 +47,8 @@ func TestInitRecordsMetricsWithExpectedNames(t *testing.T) {
 	AddInvestigationInFlight(ctx, 1)
 	SetConversationsActive(3)
 	RecordPanicRecovered(ctx, "events_api")
+	RecordAuthzDecision(ctx, true, "mcp")
+	RecordAuthzDecision(ctx, false, "slack")
 
 	families, gatherErr := registry.Gather()
 	if gatherErr != nil {
@@ -71,6 +73,7 @@ func TestInitRecordsMetricsWithExpectedNames(t *testing.T) {
 		"investigations_in_flight",
 		"conversations_active",
 		"panics_recovered_total",
+		"authz_decisions_total",
 	}
 
 	for _, name := range want {

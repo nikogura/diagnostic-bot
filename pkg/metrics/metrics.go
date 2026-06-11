@@ -23,6 +23,8 @@ const (
 	ToolName          = "tool_name"
 	Category          = "category"
 	Site              = "site"
+	Decision          = "decision"
+	Source            = "source"
 )
 
 //nolint:gochecknoglobals // OTel instruments are process-wide singletons by design.
@@ -38,6 +40,7 @@ var (
 	investigationDuration  metric.Float64Histogram
 	investigationsInFlight metric.Int64UpDownCounter
 	panicsRecovered        metric.Int64Counter
+	authzDecisions         metric.Int64Counter
 
 	// conversationsActiveValue backs the conversations_active observable gauge.
 	conversationsActiveValue atomic.Int64
@@ -93,6 +96,10 @@ func Init(meter metric.Meter) (err error) {
 		metric.WithDescription("Total panics recovered in spawned goroutines, by site (self-heal; should stay flat at zero)"))
 	errs = append(errs, err)
 
+	authzDecisions, err = meter.Int64Counter("authz_decisions_total",
+		metric.WithDescription("Total tool-authorization decisions, by outcome (allow/deny) and front-end source"))
+	errs = append(errs, err)
+
 	err = registerConversationsActive(meter)
 	errs = append(errs, err)
 
@@ -142,6 +149,25 @@ func SetConversationsActive(count int64) {
 func GetConversationsActive() (count int64) {
 	count = conversationsActiveValue.Load()
 	return count
+}
+
+// RecordAuthzDecision increments the tool-authorization counter for an outcome
+// (allow/deny) and front-end source. A rising deny rate means callers are
+// hitting role boundaries — worth a dashboard panel and an alert.
+func RecordAuthzDecision(ctx context.Context, allowed bool, source string) {
+	if authzDecisions == nil {
+		return
+	}
+
+	outcome := "deny"
+	if allowed {
+		outcome = "allow"
+	}
+
+	authzDecisions.Add(ctx, 1, metric.WithAttributes(
+		attribute.String(Decision, outcome),
+		attribute.String(Source, source),
+	))
 }
 
 // RecordPanicRecovered increments the recovered-panic counter for a goroutine

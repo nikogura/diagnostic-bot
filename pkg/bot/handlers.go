@@ -147,7 +147,9 @@ func (b *Bot) startInvestigation(ctx context.Context, channel string, threadTS s
 	// Store original user message for thread context
 	conv.OriginalUserMessage = message
 
-	// Run the investigation
+	// Run the investigation. Attach the requester's authz principal so tool
+	// calls are authorized by role (no-op when no policy is configured).
+	ctx = b.withPrincipal(ctx, userID)
 	pdfEnabled := b.pdfEnabledFor(conv)
 	investigationResult, err := b.runner.RunInvestigation(ctx, matchResult.Skill, message, pdfEnabled)
 	if err != nil {
@@ -253,7 +255,9 @@ func (b *Bot) handleThreadReply(ctx context.Context, channel string, threadTS st
 			conv.OriginalUserMessage, priorOutput, message)
 	}
 
-	// Run the follow-up investigation
+	// Run the follow-up investigation. Attach the requester's authz principal so
+	// tool calls are authorized by role (no-op when no policy is configured).
+	ctx = b.withPrincipal(ctx, userID)
 	pdfEnabled := b.pdfEnabledFor(conv)
 	investigationResult, err := b.runner.RunInvestigation(ctx, skill, followUpMessage, pdfEnabled)
 	if err != nil {

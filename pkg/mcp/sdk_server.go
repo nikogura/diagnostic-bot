@@ -60,6 +60,14 @@ func (s *SDKServer) registerTool(name, description string, schema map[string]int
 	}
 
 	s.mcpServer.AddTool(tool, func(ctx context.Context, req *sdkmcp.CallToolRequest) (result *sdkmcp.CallToolResult, err error) {
+		// Authorize before any work: the MCP HTTP path wraps the legacy execute*
+		// handlers directly, so this is its enforcement boundary (the in-process
+		// Slack path is gated in Server.DispatchTool).
+		err = s.legacy.authorize(ctx, name)
+		if err != nil {
+			return result, err
+		}
+
 		// Unmarshal raw arguments to the map format legacy handlers expect
 		args := make(map[string]interface{})
 

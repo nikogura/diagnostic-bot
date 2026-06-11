@@ -43,6 +43,13 @@ spec:
             # OTLP endpoint is optional; tracing is no-op when unset.
             - name: OTEL_EXPORTER_OTLP_ENDPOINT
               value: "http://tempo-distributor.monitoring.svc:4318"
+            # Role-based tool authorization (RBAC). Uncomment, mount the policy
+            # below, and create the ConfigMap from examples/authz.yaml:
+            #   kubectl create configmap diagnostic-bot-authz \
+            #     --from-file=authz.yaml=examples/authz.yaml
+            # Unset = authorization disabled (all tools available to all callers).
+            # - name: MCP_AUTHZ_FILE
+            #   value: "/etc/diagnostic-bot/authz.yaml"
           # Secret carries SLACK_BOT_TOKEN, SLACK_APP_TOKEN, ANTHROPIC_API_KEY.
           envFrom:
             - secretRef:
@@ -66,3 +73,12 @@ spec:
             limits:
               cpu: "1"
               memory: 1Gi
+          # Mount for the RBAC policy (see MCP_AUTHZ_FILE above). Uncomment with it.
+          # volumeMounts:
+          #   - name: authz-policy
+          #     mountPath: /etc/diagnostic-bot
+          #     readOnly: true
+      # volumes:
+      #   - name: authz-policy
+      #     configMap:
+      #       name: diagnostic-bot-authz

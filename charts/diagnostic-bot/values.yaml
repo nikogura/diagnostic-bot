@@ -39,6 +39,22 @@ config:
   # Extra raw env vars, merged verbatim.
   extraEnv: {}
 
+# Role-based tool authorization (RBAC). See the README "Tool Authorization
+# (RBAC)" section. Leave both `policy` and `existingConfigMap` empty to disable
+# authorization (every caller gets the full tool surface). When enabled, the
+# policy is mounted and MCP_AUTHZ_FILE is set automatically.
+authz:
+  # Inline policy — the full YAML document including the top-level `authz:` key
+  # (copy examples/authz.yaml). When set, the chart renders a ConfigMap from it.
+  policy: ""
+  # Alternatively, the name of an existing ConfigMap holding the policy under
+  # `key`. Takes precedence over `policy`.
+  existingConfigMap: ""
+  # ConfigMap data key and the mounted filename.
+  key: authz.yaml
+  # Directory the policy file is mounted into.
+  mountPath: /etc/diagnostic-bot
+
 # Secret holding SLACK_BOT_TOKEN, SLACK_APP_TOKEN, ANTHROPIC_API_KEY, etc.
 # Mounted via envFrom so rotation is a secret change, not a manifest change.
 existingSecret: ""
