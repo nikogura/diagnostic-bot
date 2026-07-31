@@ -78,7 +78,7 @@ func NewInvestigationRunner(model ModelClient, tools ToolDispatcher, logger *slo
 		tools:     tools,
 		outbound:  k8s.NewSanitizer(),
 		inbound:   k8s.NewInboundSanitizer(),
-		toolUsage: NewToolConfig(),
+		toolUsage: NewToolConfig(logger),
 		tracer:    otel.Tracer(tracerScope),
 		logger:    logger,
 	}

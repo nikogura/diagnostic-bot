@@ -63,16 +63,27 @@ spec:
             - name: MCP_AUTHZ_FILE
               value: {{ printf "%s/%s" .Values.authz.mountPath .Values.authz.key | quote }}
             {{- end }}
+            {{- if or .Values.apiConfigs.configs .Values.apiConfigs.existingConfigMap }}
+            - name: API_CONFIG_DIR
+              value: {{ .Values.apiConfigs.mountPath | quote }}
+            {{- end }}
           {{- if .Values.existingSecret }}
           envFrom:
             - secretRef:
                 name: {{ .Values.existingSecret }}
           {{- end }}
-          {{- if or .Values.authz.policy .Values.authz.existingConfigMap }}
+          {{- if or .Values.authz.policy .Values.authz.existingConfigMap .Values.apiConfigs.configs .Values.apiConfigs.existingConfigMap }}
           volumeMounts:
+            {{- if or .Values.authz.policy .Values.authz.existingConfigMap }}
             - name: authz-policy
               mountPath: {{ .Values.authz.mountPath | quote }}
               readOnly: true
+            {{- end }}
+            {{- if or .Values.apiConfigs.configs .Values.apiConfigs.existingConfigMap }}
+            - name: api-configs
+              mountPath: {{ .Values.apiConfigs.mountPath | quote }}
+              readOnly: true
+            {{- end }}
           {{- end }}
           livenessProbe:
             httpGet:
@@ -88,11 +99,18 @@ spec:
             periodSeconds: 15
           resources:
             {{- toYaml .Values.resources | nindent 12 }}
-      {{- if or .Values.authz.policy .Values.authz.existingConfigMap }}
+      {{- if or .Values.authz.policy .Values.authz.existingConfigMap .Values.apiConfigs.configs .Values.apiConfigs.existingConfigMap }}
       volumes:
+        {{- if or .Values.authz.policy .Values.authz.existingConfigMap }}
         - name: authz-policy
           configMap:
             name: {{ .Values.authz.existingConfigMap | default (printf "%s-authz" (include "diagnostic-bot.fullname" .)) }}
+        {{- end }}
+        {{- if or .Values.apiConfigs.configs .Values.apiConfigs.existingConfigMap }}
+        - name: api-configs
+          configMap:
+            name: {{ .Values.apiConfigs.existingConfigMap | default (printf "%s-apis" (include "diagnostic-bot.fullname" .)) }}
+        {{- end }}
       {{- end }}
       {{- with .Values.nodeSelector }}
       nodeSelector:

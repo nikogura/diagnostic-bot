@@ -1,0 +1,13 @@
+{{- if and .Values.apiConfigs.configs (not .Values.apiConfigs.existingConfigMap) }}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "diagnostic-bot.fullname" . }}-apis
+  labels:
+    {{- include "diagnostic-bot.labels" . | nindent 4 }}
+data:
+  {{- range $filename, $content := .Values.apiConfigs.configs }}
+  {{ $filename }}: |
+    {{- $content | nindent 4 }}
+  {{- end }}
+{{- end }}

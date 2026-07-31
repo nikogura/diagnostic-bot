@@ -1,6 +1,7 @@
 package apiconfig
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -59,8 +60,9 @@ func (c *APIClient) Execute(ctx context.Context, endpointName string, args map[s
 
 	var requestURL string
 	var queryParams map[string]string
+	var requestBody []byte
 
-	requestURL, queryParams, err = validateAndBuildURL(c.config.BaseURL, *endpoint, args)
+	requestURL, queryParams, requestBody, err = validateAndBuildURL(c.config.BaseURL, *endpoint, args)
 	if err != nil {
 		return result, err
 	}
@@ -83,7 +85,7 @@ func (c *APIClient) Execute(ctx context.Context, endpointName string, args map[s
 	start := time.Now()
 
 	var body []byte
-	body, err = c.doRequestWithRetry(ctx, fullURL, endpoint.Name)
+	body, err = c.doRequestWithRetry(ctx, endpoint.Method, fullURL, requestBody, endpoint.Name)
 
 	duration := time.Since(start)
 	status := "success"
@@ -130,11 +132,11 @@ func (c *APIClient) findEndpoint(name string) (endpoint *Endpoint, err error) {
 	return endpoint, err
 }
 
-func (c *APIClient) doRequestWithRetry(ctx context.Context, fullURL string, endpointName string) (body []byte, err error) {
+func (c *APIClient) doRequestWithRetry(ctx context.Context, method, fullURL string, reqBody []byte, endpointName string) (body []byte, err error) {
 	for attempt := range c.config.RateLimit.MaxRetries + 1 {
 		var requestErr error
 
-		body, requestErr = c.doSingleRequest(ctx, fullURL)
+		body, requestErr = c.doSingleRequest(ctx, method, fullURL, reqBody)
 		if requestErr == nil {
 			err = nil
 			return body, err
@@ -183,10 +185,18 @@ func waitForRetry(ctx context.Context, delay time.Duration) (err error) {
 	return err
 }
 
-func (c *APIClient) doSingleRequest(ctx context.Context, fullURL string) (body []byte, err error) {
-	var req *http.Request
+func (c *APIClient) doSingleRequest(ctx context.Context, method, fullURL string, reqBody []byte) (body []byte, err error) {
+	if method == "" {
+		method = http.MethodGet
+	}
 
-	req, err = http.NewRequestWithContext(ctx, http.MethodGet, fullURL, nil)
+	var req *http.Request
+	var bodyReader io.Reader
+	if reqBody != nil {
+		bodyReader = bytes.NewReader(reqBody)
+	}
+
+	req, err = http.NewRequestWithContext(ctx, method, fullURL, bodyReader)
 	if err != nil {
 		err = fmt.Errorf("building request: %w", err)
 		return body, err
@@ -194,6 +204,10 @@ func (c *APIClient) doSingleRequest(ctx context.Context, fullURL string) (body [
 
 	c.applyAuth(req)
 	c.applyHeaders(req)
+
+	if reqBody != nil {
+		req.Header.Set("Content-Type", "application/json")
+	}
 
 	var resp *http.Response
 

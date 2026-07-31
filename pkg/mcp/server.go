@@ -871,9 +871,14 @@ func (s *Server) getToolDefinitions() (result []MCPTool) {
 		result = append(result, getGraphQLTools()...)
 	}
 
-	// Add dynamically loaded third-party API tools
+	// Add dynamically loaded third-party API tools. In read-only mode, withhold
+	// the write ones (non-GET endpoints), the same posture applied to Grafana
+	// dashboard writes above.
 	if s.apiToolRegistry != nil && s.apiToolRegistry.HasTools() {
 		for _, tool := range s.apiToolRegistry.GetToolDefinitions() {
+			if s.readOnly && s.apiToolRegistry.IsWriteTool(tool.Name) {
+				continue
+			}
 			result = append(result, MCPTool{
 				Name:        tool.Name,
 				Description: tool.Description,
@@ -883,6 +888,17 @@ func (s *Server) getToolDefinitions() (result []MCPTool) {
 	}
 
 	return result
+}
+
+// isAPIWriteTool reports whether toolName is a third-party API tool that mutates
+// state (a non-GET endpoint). Nil-safe, so callers need not check the registry.
+func (s *Server) isAPIWriteTool(toolName string) (isWrite bool) {
+	if s.apiToolRegistry == nil {
+		return isWrite
+	}
+
+	isWrite = s.apiToolRegistry.IsWriteTool(toolName)
+	return isWrite
 }
 
 // ToolDefinitions returns the gated list of tools the server advertises,
@@ -897,8 +913,9 @@ func (s *Server) ToolDefinitions() (tools []MCPTool) {
 // dispatchToolCall routes a tool call to the appropriate handler.
 func (s *Server) dispatchToolCall(ctx context.Context, toolName string, args map[string]interface{}) (result string, err error) {
 	// Defense in depth: even though read-only mode withholds write tools from
-	// the advertised list, reject any write call that still arrives.
-	if s.readOnly && isWriteTool(toolName) {
+	// the advertised list, reject any write call that still arrives — both the
+	// built-in writes (Grafana) and third-party API tools whose method mutates.
+	if s.readOnly && (isWriteTool(toolName) || s.isAPIWriteTool(toolName)) {
 		err = fmt.Errorf("tool %q is disabled: server is in read-only mode", toolName)
 		return result, err
 	}
@@ -962,6 +979,15 @@ func (s *Server) DispatchTool(ctx context.Context, name string, args map[string]
 	result, err = s.dispatchToolCall(ctx, name, args)
 	if err == nil {
 		result = capToolResult(result, s.maxToolOutputBytes)
+
+		// Third-party API writes mutate an external system; audit them the way
+		// Grafana writes are audited — with the resolved caller identity.
+		if s.isAPIWriteTool(name) {
+			s.logger.InfoContext(ctx, "api write",
+				slog.String("tool", name),
+				slog.String("audit_user", s.auditUserFromContext(ctx)),
+				slog.String("audit_source_ip", auditSourceFromContext(ctx)))
+		}
 	}
 
 	return result, err

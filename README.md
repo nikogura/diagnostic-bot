@@ -65,7 +65,11 @@ Four example skills ship in `investigations/`: `modsecurity-block`, `atlas-migra
 
 ## Third-Party API Integrations
 
-Read-only HTTP APIs can be added as tools without code. Drop a YAML file in `API_CONFIG_DIR` (default `./apis`) describing the base URL, authentication, and endpoints; each endpoint becomes a tool. The generic client handles auth, retries, rate limiting, path-parameter validation, and JSON field redaction. See `apis/bitgo.yaml` for an example.
+HTTP APIs can be added as tools without code. Drop a YAML file in `API_CONFIG_DIR` (default `./apis`) describing the base URL, authentication, and endpoints; each endpoint becomes a tool. The generic client handles auth, retries, rate limiting, path-parameter validation, and JSON field redaction. See `apis/bitgo.yaml` for an example.
+
+By default only `GET` endpoints are exposed — the toolset is read-only. Write endpoints (`POST`/`PUT`/`PATCH`/`DELETE`) are supported but off by default and gated by four independent controls, so no single misstep enables them: the endpoint declares its `method` and its request-body fields as params with `in: body`; the deployment opts in by listing the verb in `API_ALLOWED_METHODS` (GET is always allowed); `READ_ONLY=true` withholds and rejects every write regardless; and the tool-authorization policy scopes each write tool (e.g. `jira_add_comment`) to specific roles — put writes `via: ["mcp"]` so they're only reachable over the authenticated transport, never broadcast to a Slack channel. A method that isn't permitted is withheld from the toolset and rejected at dispatch, and every write is audit-logged with the caller's identity.
+
+In-cluster, provide the configs as a mounted ConfigMap, the same way as the authorization policy. **Helm:** set `apiConfigs.configs` (a map of filename → YAML document) or point `apiConfigs.existingConfigMap` at an existing one — the chart mounts it and sets `API_CONFIG_DIR` for you. **Kustomize:** uncomment the `API_CONFIG_DIR` env and the `api-configs` volume/mount in `kubernetes/deployment.yaml`, and create the ConfigMap from your configs (`kubectl create configmap diagnostic-bot-apis --from-file=apis/`). Each config's auth token is read from the environment by its `token_env` and comes from the Secret, never the ConfigMap.
 
 ## Configuration
 
@@ -89,6 +93,7 @@ All configuration is via environment variables.
 | `COMPANY_NAME` | `Company` | Branding on PDF reports |
 | `FILE_RETENTION` | `24h` | Generated-file cleanup interval |
 | `API_CONFIG_DIR` | `./apis` | Third-party API config directory |
+| `API_ALLOWED_METHODS` | `GET` | HTTP methods third-party API tools may use. GET is always allowed; add write verbs (e.g. `POST,PATCH`) to enable write endpoints. Accepts commas **and** newlines. `READ_ONLY` still overrides. |
 | `PDF_FONT` | `helvetica` | Report font: `helvetica`, `times`, or `courier` (code blocks are always monospace) |
 | `PDF_DISABLED` | `false` | Globally disable PDF report generation (text-only responses) |
 

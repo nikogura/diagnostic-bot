@@ -1,6 +1,7 @@
 package bot
 
 import (
+	"log/slog"
 	"os"
 	"strings"
 
@@ -24,8 +25,11 @@ type ToolConfig struct {
 }
 
 // NewToolConfig checks environment variables to determine which tool categories
-// are available. The checks mirror the client initialization logic in pkg/mcp/server.go.
-func NewToolConfig() (config ToolConfig) {
+// are available. The checks mirror the client initialization logic in
+// pkg/mcp/server.go, so the Slack prompt's tool prose matches the tool surface
+// the shared MCP server advertises and dispatches — including the operator's
+// third-party API tools, loaded from the same API_CONFIG_DIR the server reads.
+func NewToolConfig(logger *slog.Logger) (config ToolConfig) {
 	config = ToolConfig{
 		LokiAvailable:       os.Getenv("LOKI_ENDPOINT") != "",
 		CloudWatchAvailable: os.Getenv("CLOUDWATCH_ASSUME_ROLE") != "" || os.Getenv("CLOUDWATCH_ACCOUNTS") != "",
@@ -36,6 +40,7 @@ func NewToolConfig() (config ToolConfig) {
 		ECRAvailable:        os.Getenv("AWS_REGION") != "" || os.Getenv("AWS_DEFAULT_REGION") != "",
 		K8sAvailable:        hasK8sConfig(),
 		ReadOnly:            mcp.ReadOnlyEnabled(),
+		APIToolRegistry:     apiconfig.LoadRegistryFromEnv(logger),
 	}
 
 	return config
@@ -86,9 +91,10 @@ func (tc ToolConfig) WriteToolUsage(builder *strings.Builder, allowed map[string
 		writeECRToolUsage(builder, permits)
 	}
 
-	// Third-party API tools
+	// Third-party API tools, gated by the same permits check as every other
+	// category so the prose can't describe a tool the caller can't dispatch.
 	if tc.APIToolRegistry != nil && tc.APIToolRegistry.HasTools() {
-		tc.APIToolRegistry.WriteToolUsage(builder)
+		tc.APIToolRegistry.WriteToolUsage(builder, permits)
 	}
 
 	// Utility tools are always available

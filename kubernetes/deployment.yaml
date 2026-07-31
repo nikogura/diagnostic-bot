@@ -50,6 +50,13 @@ spec:
             # Unset = authorization disabled (all tools available to all callers).
             # - name: MCP_AUTHZ_FILE
             #   value: "/etc/diagnostic-bot/authz.yaml"
+            # Third-party API tools (see README "Third-Party API Integrations").
+            # Uncomment, mount the configs below, and create the ConfigMap from
+            # your apis/*.yaml (each config's token_env comes from the Secret):
+            #   kubectl create configmap diagnostic-bot-apis --from-file=apis/
+            # Unset = no third-party API tools.
+            # - name: API_CONFIG_DIR
+            #   value: "/etc/diagnostic-bot/apis"
           # Secret carries SLACK_BOT_TOKEN, SLACK_APP_TOKEN, ANTHROPIC_API_KEY.
           envFrom:
             - secretRef:
@@ -73,12 +80,19 @@ spec:
             limits:
               cpu: "1"
               memory: 1Gi
-          # Mount for the RBAC policy (see MCP_AUTHZ_FILE above). Uncomment with it.
+          # Mounts for the RBAC policy and/or third-party API configs (see the
+          # env vars above). Uncomment the entries you actually use.
           # volumeMounts:
           #   - name: authz-policy
           #     mountPath: /etc/diagnostic-bot
+          #     readOnly: true
+          #   - name: api-configs
+          #     mountPath: /etc/diagnostic-bot/apis
           #     readOnly: true
       # volumes:
       #   - name: authz-policy
       #     configMap:
       #       name: diagnostic-bot-authz
+      #   - name: api-configs
+      #     configMap:
+      #       name: diagnostic-bot-apis

@@ -1,6 +1,7 @@
 package apiconfig
 
 import (
+	"encoding/json"
 	"testing"
 )
 
@@ -118,7 +119,7 @@ func TestValidateAndBuildURL(t *testing.T) {
 		"coin":      "btc",
 	}
 
-	requestURL, queryParams, err := validateAndBuildURL("https://api.bitgo.com", endpoint, args)
+	requestURL, queryParams, _, err := validateAndBuildURL("https://api.bitgo.com", endpoint, args)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -146,8 +147,76 @@ func TestValidateAndBuildURL_UnresolvedPlaceholder(t *testing.T) {
 
 	args := map[string]interface{}{}
 
-	_, _, err := validateAndBuildURL("https://api.example.com", endpoint, args)
+	_, _, _, err := validateAndBuildURL("https://api.example.com", endpoint, args)
 	if err == nil {
 		t.Error("expected error for unresolved placeholder")
+	}
+}
+
+func TestValidateAndBuildURL_BodyParams(t *testing.T) {
+	t.Parallel()
+
+	endpoint := Endpoint{
+		Name:   "add_comment",
+		Method: "POST",
+		Path:   "/issue/{id}/comment",
+		Params: []Param{
+			{Name: "id", Type: "string", Required: true, In: "path"},
+			{Name: "body", Type: "string", Required: true, In: "body"},
+			{Name: "visible", Type: "boolean", In: "body"},
+		},
+	}
+	args := map[string]interface{}{
+		"id":      "PROJ-1",
+		"body":    "looks good",
+		"visible": true,
+	}
+
+	requestURL, queryParams, bodyBytes, err := validateAndBuildURL("https://jira.example.com", endpoint, args)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if requestURL != "https://jira.example.com/issue/PROJ-1/comment" {
+		t.Errorf("unexpected URL: %s", requestURL)
+	}
+	if len(queryParams) != 0 {
+		t.Errorf("body params must not leak into the query string: %v", queryParams)
+	}
+	if len(bodyBytes) == 0 {
+		t.Fatal("expected a JSON body to be built from body params")
+	}
+
+	var body map[string]interface{}
+	unmarshalErr := json.Unmarshal(bodyBytes, &body)
+	if unmarshalErr != nil {
+		t.Fatalf("body is not valid JSON: %v", unmarshalErr)
+	}
+	if body["body"] != "looks good" {
+		t.Errorf("body.body = %v, want 'looks good'", body["body"])
+	}
+	if body["visible"] != true {
+		t.Errorf("body.visible = %v, want true", body["visible"])
+	}
+	if _, leaked := body["id"]; leaked {
+		t.Error("the path param must not appear in the request body")
+	}
+}
+
+func TestValidateAndBuildURL_RequiredBodyParamMissing(t *testing.T) {
+	t.Parallel()
+
+	endpoint := Endpoint{
+		Name:   "add_comment",
+		Method: "POST",
+		Path:   "/comment",
+		Params: []Param{
+			{Name: "body", Type: "string", Required: true, In: "body"},
+		},
+	}
+
+	_, _, _, err := validateAndBuildURL("https://jira.example.com", endpoint, map[string]interface{}{})
+	if err == nil {
+		t.Error("expected an error for a missing required body param")
 	}
 }

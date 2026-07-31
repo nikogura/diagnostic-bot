@@ -15,6 +15,7 @@ import (
 
 	"go.opentelemetry.io/otel"
 
+	"github.com/nikogura/diagnostic-bot/pkg/apiconfig"
 	"github.com/nikogura/diagnostic-bot/pkg/bot"
 	"github.com/nikogura/diagnostic-bot/pkg/k8s"
 	"github.com/nikogura/diagnostic-bot/pkg/mcp"
@@ -282,7 +283,11 @@ func buildToolServer(ctx context.Context, githubToken string, logger *slog.Logge
 	lokiClient := k8s.NewLokiClient(lokiEndpoint, logger)
 	configureLokiTenants(ctx, lokiClient, logger)
 
-	server = mcp.NewServer(lokiClient, githubToken, nil, logger)
+	// Operator-supplied third-party API tools (API_CONFIG_DIR). Absent config
+	// degrades to an empty registry, so this is a no-op unless configured.
+	apiRegistry := apiconfig.LoadRegistryFromEnv(logger)
+
+	server = mcp.NewServer(lokiClient, githubToken, apiRegistry, logger)
 
 	return server
 }

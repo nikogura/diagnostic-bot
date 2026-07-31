@@ -55,6 +55,25 @@ authz:
   # Directory the policy file is mounted into.
   mountPath: /etc/diagnostic-bot
 
+# Third-party API tools. See the README "Third-Party API Integrations" section.
+# Leave both `configs` and `existingConfigMap` empty to disable (no API tools).
+# When set, the configs are mounted as a directory and API_CONFIG_DIR is set to
+# it automatically. Each config's auth token comes from the Secret
+# (existingSecret), read by the token_env named inside the config.
+#
+# Write endpoints (POST/PUT/PATCH/DELETE) are off by default. Enable specific
+# verbs deployment-wide via config.extraEnv.API_ALLOWED_METHODS (e.g. "POST");
+# READ_ONLY still overrides. See the README "Third-Party API Integrations".
+apiConfigs:
+  # Inline configs: a map of filename -> YAML document (copy apis/bitgo.yaml).
+  # Each key becomes a *.yaml file in the mounted directory.
+  configs: {}
+  # Alternatively, the name of an existing ConfigMap whose keys are *.yaml API
+  # configs. Takes precedence over `configs`.
+  existingConfigMap: ""
+  # Directory the configs are mounted into; also the value of API_CONFIG_DIR.
+  mountPath: /etc/diagnostic-bot/apis
+
 # Secret holding SLACK_BOT_TOKEN, SLACK_APP_TOKEN, ANTHROPIC_API_KEY, etc.
 # Mounted via envFrom so rotation is a secret change, not a manifest change.
 existingSecret: ""

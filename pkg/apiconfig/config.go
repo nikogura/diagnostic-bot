@@ -185,9 +185,26 @@ func validateConfig(config *APIConfig) (err error) {
 			err = fmt.Errorf("API config %q endpoint %q missing path", config.Name, ep.Name)
 			return err
 		}
+		if ep.Method != "" && !isKnownMethod(strings.ToUpper(ep.Method)) {
+			err = fmt.Errorf("API config %q endpoint %q has unsupported method %q (want GET, POST, PUT, PATCH, or DELETE)", config.Name, ep.Name, ep.Method)
+			return err
+		}
 	}
 
 	return err
+}
+
+// isKnownMethod reports whether m (already upper-cased) is an HTTP method the
+// generic client supports. Whether a non-GET method is actually *permitted* at
+// runtime is a separate, deployment-level decision (API_ALLOWED_METHODS); this
+// only rejects garbage like "FROBNICATE" at config-load time.
+func isKnownMethod(m string) (known bool) {
+	switch m {
+	case http.MethodGet, http.MethodPost, http.MethodPut, http.MethodPatch, http.MethodDelete:
+		known = true
+	}
+
+	return known
 }
 
 func applyDefaults(config *APIConfig) {
@@ -210,6 +227,10 @@ func applyDefaults(config *APIConfig) {
 	for i := range config.Endpoints {
 		if config.Endpoints[i].Method == "" {
 			config.Endpoints[i].Method = defaultMethod
+		} else {
+			// Normalize so downstream method comparisons (allowlist, write
+			// classification, the client's request builder) are case-stable.
+			config.Endpoints[i].Method = strings.ToUpper(config.Endpoints[i].Method)
 		}
 		for j := range config.Endpoints[i].Params {
 			if config.Endpoints[i].Params[j].In == "" {

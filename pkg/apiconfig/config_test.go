@@ -192,3 +192,38 @@ func TestValidateConfig_NoEndpoints(t *testing.T) {
 		t.Error("expected error for no endpoints")
 	}
 }
+
+func TestValidateConfig_RejectsUnknownMethod(t *testing.T) {
+	config := &APIConfig{
+		Name:    "bad",
+		BaseURL: "https://api.example.com",
+		Endpoints: []Endpoint{
+			{Name: "weird", Path: "/w", Method: "FROBNICATE"},
+		},
+	}
+
+	err := validateConfig(config)
+	if err == nil {
+		t.Error("expected validateConfig to reject an unsupported HTTP method")
+	}
+}
+
+func TestApplyDefaults_UppercasesMethod(t *testing.T) {
+	config := &APIConfig{
+		Name:    "api",
+		BaseURL: "https://api.example.com",
+		Endpoints: []Endpoint{
+			{Name: "a", Path: "/a", Method: "post"},
+			{Name: "b", Path: "/b"}, // empty -> GET
+		},
+	}
+
+	applyDefaults(config)
+
+	if config.Endpoints[0].Method != http.MethodPost {
+		t.Errorf("method not normalized to upper: %q", config.Endpoints[0].Method)
+	}
+	if config.Endpoints[1].Method != http.MethodGet {
+		t.Errorf("empty method not defaulted to GET: %q", config.Endpoints[1].Method)
+	}
+}
