@@ -178,10 +178,15 @@ func writeCloudWatchToolUsage(builder *strings.Builder, permits func(string) boo
 	toolLine(&lines, permits, "cloudwatch_logs_query", "Execute CloudWatch Logs Insights queries across AWS log groups")
 	toolLine(&lines, permits, "cloudwatch_logs_list_groups", "List available CloudWatch log groups in an AWS region")
 	toolLine(&lines, permits, "cloudwatch_logs_get_events", "Get log events from a specific CloudWatch log stream")
+	toolLine(&lines, permits, "cloudwatch_metrics_list", "Discover CloudWatch metrics (namespaces, names, dimensions)")
+	toolLine(&lines, permits, "cloudwatch_metrics_get_statistics", "Fetch time-series statistics for a single CloudWatch metric")
+	toolLine(&lines, permits, "cloudwatch_metrics_query", "Query CloudWatch metric data with optional metric math (GetMetricData)")
+	toolLine(&lines, permits, "cloudwatch_alarms_list", "List CloudWatch alarms and their current state (OK/ALARM/INSUFFICIENT_DATA)")
+	toolLine(&lines, permits, "cloudwatch_alarms_history", "Retrieve CloudWatch alarm state-transition history for post-incident diagnosis")
 	if lines.Len() == 0 {
 		return
 	}
-	builder.WriteString("**CloudWatch Logs:**\n")
+	builder.WriteString("**CloudWatch Logs, Metrics & Alarms:**\n")
 	builder.WriteString(lines.String())
 	builder.WriteString("\n")
 }

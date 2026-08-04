@@ -23,6 +23,8 @@ All tools are read-only except the Grafana dashboard-management tools. Each grou
 |-------|-------|------------|
 | Logs (Loki) | `loki_query` | `LOKI_ENDPOINT` |
 | Logs (CloudWatch) | `cloudwatch_logs_query`, `cloudwatch_logs_list_groups`, `cloudwatch_logs_get_events` | `CLOUDWATCH_ACCOUNTS` or `CLOUDWATCH_ASSUME_ROLE` |
+| Metrics (CloudWatch) | `cloudwatch_metrics_list`, `cloudwatch_metrics_get_statistics`, `cloudwatch_metrics_query` | `CLOUDWATCH_ACCOUNTS` or `CLOUDWATCH_ASSUME_ROLE` |
+| Alarms (CloudWatch) | `cloudwatch_alarms_list`, `cloudwatch_alarms_history` | `CLOUDWATCH_ACCOUNTS` or `CLOUDWATCH_ASSUME_ROLE` |
 | Metrics (Prometheus) | `prometheus_query`, `prometheus_query_range`, `prometheus_series`, `prometheus_label_values`, `prometheus_list_endpoints` | `PROMETHEUS_URL` / `PROMETHEUS_<NAME>_URL` |
 | Traces (Tempo) | `tempo_get_trace`, `tempo_search_traces`, `tempo_list_endpoints` | `TEMPO_URL` / `TEMPO_<NAME>_URL` |
 | Grafana (read) | `grafana_list_dashboards`, `grafana_get_dashboard`, `grafana_get_dashboard_version` | `GRAFANA_URL` + `GRAFANA_API_KEY` |
@@ -121,7 +123,7 @@ All configuration is via environment variables.
 | Variable | Enables |
 |----------|---------|
 | `LOKI_ENDPOINT`, `LOKI_DEFAULT_ORG_ID`, `LOKI_ORG_IDS` | Loki log queries |
-| `CLOUDWATCH_ACCOUNTS` or `CLOUDWATCH_ASSUME_ROLE`, `CLOUDWATCH_EXTERNAL_ID` | CloudWatch Logs |
+| `CLOUDWATCH_ACCOUNTS` or `CLOUDWATCH_ASSUME_ROLE`, `CLOUDWATCH_EXTERNAL_ID` | CloudWatch Logs, Metrics, and Alarms |
 | `PROMETHEUS_URL` / `PROMETHEUS_<NAME>_URL` | Prometheus queries |
 | `TEMPO_URL` / `TEMPO_<NAME>_URL` | Tempo trace lookups |
 | `GRAFANA_URL`, `GRAFANA_API_KEY` | Grafana dashboard tools |
@@ -141,6 +143,41 @@ List-valued variables (e.g. `LOKI_ORG_IDS`) accept commas **and** newlines, so a
     cloudtrail
     self-monitoring
 ```
+
+### CloudWatch IAM Permissions
+
+The CloudWatch Logs, Metrics, and Alarms tools are read-only and need only these
+actions on the target account's role (assumed via `CLOUDWATCH_ASSUME_ROLE` /
+`CLOUDWATCH_ACCOUNTS`, or granted directly to the pod's IRSA role). Scope them as
+tightly as your environment allows:
+
+```json
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Sid": "DiagnosticBotCloudWatchReadOnly",
+      "Effect": "Allow",
+      "Action": [
+        "logs:StartQuery",
+        "logs:GetQueryResults",
+        "logs:DescribeLogGroups",
+        "logs:GetLogEvents",
+        "cloudwatch:ListMetrics",
+        "cloudwatch:GetMetricStatistics",
+        "cloudwatch:GetMetricData",
+        "cloudwatch:DescribeAlarms",
+        "cloudwatch:DescribeAlarmHistory"
+      ],
+      "Resource": "*"
+    }
+  ]
+}
+```
+
+In EKS, attach the role to the bot's ServiceAccount with an
+`eks.amazonaws.com/role-arn` annotation (IRSA). See the Kustomize
+`kubernetes/serviceaccount.yaml` and the chart's `serviceAccount.annotations`.
 
 ## MCP Server Authentication
 

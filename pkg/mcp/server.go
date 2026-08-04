@@ -50,23 +50,24 @@ const (
 
 // Server implements the MCP (Model Context Protocol) server.
 type Server struct {
-	lokiClient              *k8s.LokiClient
-	githubClient            *github.Client
-	gitlabClient            *GitLabClient
-	dbClients               map[string]*DatabaseClient
-	grafanaClient           *GrafanaClient
-	graphqlClients          map[string]*GraphQLClient
-	prometheusClients       map[string]*PrometheusClient
-	tempoClients            map[string]*TempoClient
-	cloudWatchClientFactory CloudWatchClientFactory
-	apiToolRegistry         *apiconfig.APIToolRegistry
-	k8sClusters             map[string]*k8s.Agent
-	logger                  *slog.Logger
-	companyName             string
-	auditUser               string
-	readOnly                bool
-	maxToolOutputBytes      int
-	authorizer              *authz.Policy
+	lokiClient                     *k8s.LokiClient
+	githubClient                   *github.Client
+	gitlabClient                   *GitLabClient
+	dbClients                      map[string]*DatabaseClient
+	grafanaClient                  *GrafanaClient
+	graphqlClients                 map[string]*GraphQLClient
+	prometheusClients              map[string]*PrometheusClient
+	tempoClients                   map[string]*TempoClient
+	cloudWatchClientFactory        CloudWatchClientFactory
+	cloudWatchMetricsClientFactory CloudWatchMetricsClientFactory
+	apiToolRegistry                *apiconfig.APIToolRegistry
+	k8sClusters                    map[string]*k8s.Agent
+	logger                         *slog.Logger
+	companyName                    string
+	auditUser                      string
+	readOnly                       bool
+	maxToolOutputBytes             int
+	authorizer                     *authz.Policy
 }
 
 // NewServer creates a new MCP server.
@@ -150,23 +151,24 @@ func NewServer(lokiClient *k8s.LokiClient, githubToken string, apiToolRegistry *
 	}
 
 	result = &Server{
-		lokiClient:              lokiClient,
-		githubClient:            githubClient,
-		gitlabClient:            gitlabClient,
-		dbClients:               dbClients,
-		grafanaClient:           grafanaClient,
-		graphqlClients:          graphqlClients,
-		prometheusClients:       prometheusClients,
-		tempoClients:            tempoClients,
-		cloudWatchClientFactory: defaultCloudWatchClientFactory,
-		apiToolRegistry:         apiToolRegistry,
-		k8sClusters:             loadK8sClusters(logger),
-		logger:                  logger,
-		companyName:             companyName,
-		auditUser:               resolveAuditUser(logger),
-		readOnly:                ReadOnlyEnabled(),
-		maxToolOutputBytes:      resolveMaxToolOutputBytes(),
-		authorizer:              loadAuthorizer(logger),
+		lokiClient:                     lokiClient,
+		githubClient:                   githubClient,
+		gitlabClient:                   gitlabClient,
+		dbClients:                      dbClients,
+		grafanaClient:                  grafanaClient,
+		graphqlClients:                 graphqlClients,
+		prometheusClients:              prometheusClients,
+		tempoClients:                   tempoClients,
+		cloudWatchClientFactory:        defaultCloudWatchClientFactory,
+		cloudWatchMetricsClientFactory: defaultCloudWatchMetricsClientFactory,
+		apiToolRegistry:                apiToolRegistry,
+		k8sClusters:                    loadK8sClusters(logger),
+		logger:                         logger,
+		companyName:                    companyName,
+		auditUser:                      resolveAuditUser(logger),
+		readOnly:                       ReadOnlyEnabled(),
+		maxToolOutputBytes:             resolveMaxToolOutputBytes(),
+		authorizer:                     loadAuthorizer(logger),
 	}
 
 	if result.readOnly {
@@ -861,6 +863,8 @@ func (s *Server) getToolDefinitions() (result []MCPTool) {
 
 	if isCloudWatchConfigured() {
 		result = append(result, getCloudWatchTools()...)
+		result = append(result, getCloudWatchMetricsTools()...)
+		result = append(result, getCloudWatchAlarmsTools()...)
 	}
 
 	if len(s.prometheusClients) > 0 {
@@ -1002,6 +1006,16 @@ func (s *Server) dispatchExtendedToolCall(ctx context.Context, toolName string, 
 		result, err = s.executeCloudWatchLogsListGroups(ctx, args)
 	case toolCloudWatchLogsGetEvents:
 		result, err = s.executeCloudWatchLogsGetEvents(ctx, args)
+	case toolCloudWatchMetricsList:
+		result, err = s.executeCloudWatchMetricsList(ctx, args)
+	case toolCloudWatchMetricsGetStatistics:
+		result, err = s.executeCloudWatchMetricsGetStatistics(ctx, args)
+	case toolCloudWatchMetricsQuery:
+		result, err = s.executeCloudWatchMetricsQuery(ctx, args)
+	case toolCloudWatchAlarmsList:
+		result, err = s.executeCloudWatchAlarmsList(ctx, args)
+	case toolCloudWatchAlarmsHistory:
+		result, err = s.executeCloudWatchAlarmsHistory(ctx, args)
 	case toolPrometheusQuery:
 		result, err = s.executePrometheusQuery(ctx, args)
 	case toolPrometheusQueryRange:

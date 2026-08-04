@@ -25,6 +25,9 @@ const (
 	toolCloudWatchLogsGetEvents  = "cloudwatch_logs_get_events"
 )
 
+// descCloudWatchRegion is the shared schema description for the AWS region arg.
+const descCloudWatchRegion = "AWS region (default: us-east-1)"
+
 // Default values for CloudWatch Logs queries.
 const (
 	defaultCloudWatchRegion     = "us-east-1"
@@ -190,7 +193,7 @@ func getCloudWatchTools() (result []MCPTool) {
 					},
 					"region": map[string]interface{}{
 						"type":        "string",
-						"description": "AWS region (default: us-east-1)",
+						"description": descCloudWatchRegion,
 					},
 					"limit": map[string]interface{}{
 						"type":        "integer",
@@ -213,7 +216,7 @@ func getCloudWatchTools() (result []MCPTool) {
 					},
 					"region": map[string]interface{}{
 						"type":        "string",
-						"description": "AWS region (default: us-east-1)",
+						"description": descCloudWatchRegion,
 					},
 					"limit": map[string]interface{}{
 						"type":        "integer",
@@ -247,7 +250,7 @@ func getCloudWatchTools() (result []MCPTool) {
 					},
 					"region": map[string]interface{}{
 						"type":        "string",
-						"description": "AWS region (default: us-east-1)",
+						"description": descCloudWatchRegion,
 					},
 					"limit": map[string]interface{}{
 						"type":        "integer",

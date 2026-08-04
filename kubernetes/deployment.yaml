@@ -43,6 +43,24 @@ spec:
             # OTLP endpoint is optional; tracing is no-op when unset.
             - name: OTEL_EXPORTER_OTLP_ENDPOINT
               value: "http://tempo-distributor.monitoring.svc:4318"
+            # CloudWatch Logs, Metrics, and Alarms tools (all read-only). Enable
+            # by giving the pod AWS credentials — the ServiceAccount IRSA role
+            # (see serviceaccount.yaml) is the recommended path — and setting one
+            # of the two config styles below. Required IAM actions are documented
+            # in the README ("CloudWatch IAM Permissions").
+            #
+            # Multi-account: JSON map of friendly name -> role ARN to assume.
+            # - name: CLOUDWATCH_ACCOUNTS
+            #   value: |-
+            #     {"dev":"arn:aws:iam::111111111111:role/diagnostic-bot-cw-reader",
+            #      "prod":"arn:aws:iam::222222222222:role/diagnostic-bot-cw-reader"}
+            # Legacy single-account: one role ARN to assume (omit to use the
+            # pod's own IRSA credentials directly).
+            # - name: CLOUDWATCH_ASSUME_ROLE
+            #   value: "arn:aws:iam::111111111111:role/diagnostic-bot-cw-reader"
+            # Optional external ID, when the target role's trust policy requires it.
+            # - name: CLOUDWATCH_EXTERNAL_ID
+            #   value: "org-12345"
             # Role-based tool authorization (RBAC). Uncomment, mount the policy
             # below, and create the ConfigMap from examples/authz.yaml:
             #   kubectl create configmap diagnostic-bot-authz \
