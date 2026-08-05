@@ -88,16 +88,15 @@ func loadAWSConfig(ctx context.Context, region string) (cfg aws.Config, err erro
 	return cfg, err
 }
 
-// awsCredentialsAvailable returns true if AWS credentials can be loaded.
-func awsCredentialsAvailable() (available bool) {
-	cfg, err := config.LoadDefaultConfig(context.Background())
-	if err != nil {
-		return available
-	}
-
-	_, err = cfg.Credentials.Retrieve(context.Background())
-	available = err == nil
-	return available
+// awsConfigured reports whether an AWS region is configured. It is the single,
+// cheap, deterministic gate for the ECR and AWS read tools — used by BOTH the
+// MCP transport (SDK registration) and the legacy dispatch path
+// (getToolDefinitions), so the two tool surfaces cannot diverge. Region
+// presence (not a live credential probe) keeps repeated tool-list builds fast
+// and side-effect-free.
+func awsConfigured() (configured bool) {
+	configured = os.Getenv("AWS_REGION") != "" || os.Getenv("AWS_DEFAULT_REGION") != ""
+	return configured
 }
 
 // formatAWSJSON marshals a value to indented JSON for tool output.

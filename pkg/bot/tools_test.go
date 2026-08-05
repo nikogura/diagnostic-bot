@@ -229,6 +229,57 @@ func TestWriteToolUsageWithCloudWatch(t *testing.T) {
 	assert.NotContains(t, output, "loki_query", "Should not include Loki")
 }
 
+// TestWriteToolUsageAdditionalFamilies covers the prose for the GitLab, Tempo,
+// AWS, and GraphQL families — previously absent from the Slack prompt even
+// though the tools were dispatchable over MCP. Each must appear when available.
+func TestWriteToolUsageAdditionalFamilies(t *testing.T) {
+	t.Parallel()
+
+	config := ToolConfig{
+		GitLabAvailable:  true,
+		TempoAvailable:   true,
+		AWSAvailable:     true,
+		GraphQLAvailable: true,
+	}
+
+	var builder strings.Builder
+	config.WriteToolUsage(&builder, nil)
+	output := builder.String()
+
+	for _, name := range []string{
+		"gitlab_get_file",
+		"gitlab_search_code",
+		"tempo_get_trace",
+		"tempo_search_traces",
+		"sts_get_caller_identity",
+		"ec2_describe_vpcs",
+		"s3_list_buckets",
+		"graphql_query",
+		"graphql_list_endpoints",
+	} {
+		assert.Contains(t, output, name, "prose should include %q when its family is available", name)
+	}
+
+	assert.NotContains(t, output, "loki_query", "should not include unconfigured families")
+}
+
+// TestNewToolConfigDetectsAdditionalFamilies verifies the env-driven detection
+// for the newly surfaced families mirrors the server's gates.
+func TestNewToolConfigDetectsAdditionalFamilies(t *testing.T) {
+	t.Setenv("GITLAB_TOKEN", "glpat-xxx")
+	t.Setenv("TEMPO_URL", "http://tempo:3200")
+	t.Setenv("GRAPHQL_STAGING_URL", "http://gql/graphql")
+	t.Setenv("AWS_REGION", "us-east-1")
+
+	config := NewToolConfig(testLogger())
+
+	assert.True(t, config.GitLabAvailable, "GITLAB_TOKEN should enable GitLab")
+	assert.True(t, config.TempoAvailable, "TEMPO_URL should enable Tempo")
+	assert.True(t, config.GraphQLAvailable, "GRAPHQL_<NAME>_URL should enable GraphQL")
+	assert.True(t, config.AWSAvailable, "AWS_REGION should enable AWS read tools")
+	assert.True(t, config.ECRAvailable, "AWS_REGION should enable ECR")
+}
+
 func TestWriteToolUsageAllEnabled(t *testing.T) {
 	t.Parallel()
 

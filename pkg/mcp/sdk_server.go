@@ -206,7 +206,7 @@ func (s *SDKServer) registerGitHubTools() {
 }
 
 func (s *SDKServer) registerECRTools() {
-	if s.legacy.cloudWatchClientFactory == nil {
+	if !awsConfigured() {
 		return
 	}
 
@@ -284,19 +284,36 @@ func (s *SDKServer) registerGrafanaTools() {
 }
 
 func (s *SDKServer) registerCloudWatchTools() {
-	if s.legacy.cloudWatchClientFactory == nil {
+	if !isCloudWatchConfigured() {
 		return
 	}
 
 	handlers := map[string]func(context.Context, map[string]interface{}) (string, error){
-		toolCloudWatchLogsQuery:      s.legacy.executeCloudWatchLogsQuery,
-		toolCloudWatchLogsListGroups: s.legacy.executeCloudWatchLogsListGroups,
-		toolCloudWatchLogsGetEvents:  s.legacy.executeCloudWatchLogsGetEvents,
+		toolCloudWatchLogsQuery:            s.legacy.executeCloudWatchLogsQuery,
+		toolCloudWatchLogsListGroups:       s.legacy.executeCloudWatchLogsListGroups,
+		toolCloudWatchLogsGetEvents:        s.legacy.executeCloudWatchLogsGetEvents,
+		toolCloudWatchMetricsList:          s.legacy.executeCloudWatchMetricsList,
+		toolCloudWatchMetricsGetStatistics: s.legacy.executeCloudWatchMetricsGetStatistics,
+		toolCloudWatchMetricsQuery:         s.legacy.executeCloudWatchMetricsQuery,
+		toolCloudWatchAlarmsList:           s.legacy.executeCloudWatchAlarmsList,
+		toolCloudWatchAlarmsHistory:        s.legacy.executeCloudWatchAlarmsHistory,
 	}
 
-	for _, t := range getCloudWatchTools() {
-		if h, ok := handlers[t.Name]; ok {
-			s.registerTool(t.Name, t.Description, t.InputSchema, h)
+	// getCloudWatchTools (logs), getCloudWatchMetricsTools, and
+	// getCloudWatchAlarmsTools are the three getters behind the legacy
+	// getToolDefinitions CloudWatch block — iterate all three so the SDK
+	// transport advertises the same set the legacy path dispatches.
+	getters := [][]MCPTool{
+		getCloudWatchTools(),
+		getCloudWatchMetricsTools(),
+		getCloudWatchAlarmsTools(),
+	}
+
+	for _, tools := range getters {
+		for _, t := range tools {
+			if h, ok := handlers[t.Name]; ok {
+				s.registerTool(t.Name, t.Description, t.InputSchema, h)
+			}
 		}
 	}
 }
@@ -375,7 +392,7 @@ func (s *SDKServer) registerTempoTools() {
 }
 
 func (s *SDKServer) registerAWSTools() {
-	if !awsCredentialsAvailable() {
+	if !awsConfigured() {
 		return
 	}
 

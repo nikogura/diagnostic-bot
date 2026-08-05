@@ -33,7 +33,7 @@ All tools are read-only except the Grafana dashboard-management tools. Each grou
 | Kubernetes (read-only) | `k8s_get_resource` (configmap/deployment/service/pod/Flux/Atlas CRDs — **never Secrets**), `k8s_pod_logs`, `k8s_list_pods`, `k8s_get_events` | in-cluster ServiceAccount, or `KUBECONFIG` |
 | GitHub | `github_get_file`, `github_list_directory`, `github_search_code` | `GITHUB_TOKEN` |
 | GitLab | `gitlab_get_file`, `gitlab_list_directory`, `gitlab_search_code` | `GITLAB_TOKEN` |
-| AWS (read) | `sts_get_caller_identity`, `iam_list_roles`, `iam_get_role`, `ec2_describe_vpcs`, `ec2_describe_subnets`, `ec2_describe_security_groups`, `ec2_describe_nat_gateways`, `route53_list_hosted_zones`, `route53_list_records`, `s3_list_buckets`, `s3_get_bucket_policy` | AWS credentials |
+| AWS (read) | `sts_get_caller_identity`, `iam_list_roles`, `iam_get_role`, `ec2_describe_vpcs`, `ec2_describe_subnets`, `ec2_describe_security_groups`, `ec2_describe_nat_gateways`, `route53_list_hosted_zones`, `route53_list_records`, `s3_list_buckets`, `s3_get_bucket_policy` | `AWS_REGION` / `AWS_DEFAULT_REGION` |
 | Container scans (ECR) | `ecr_scan_results` | `AWS_REGION` / `AWS_DEFAULT_REGION` |
 | GraphQL | `graphql_query`, `graphql_list_endpoints` | `GRAPHQL_URL` / `GRAPHQL_<NAME>_URL` |
 | Utility | `whois_lookup`, `generate_pdf`, `list_my_tools` | always available |
@@ -144,12 +144,12 @@ List-valued variables (e.g. `LOKI_ORG_IDS`) accept commas **and** newlines, so a
     self-monitoring
 ```
 
-### CloudWatch IAM Permissions
+### AWS IAM Permissions
 
-The CloudWatch Logs, Metrics, and Alarms tools are read-only and need only these
-actions on the target account's role (assumed via `CLOUDWATCH_ASSUME_ROLE` /
-`CLOUDWATCH_ACCOUNTS`, or granted directly to the pod's IRSA role). Scope them as
-tightly as your environment allows:
+All AWS-backed tools are read-only. Grant only the actions for the families you
+enable, on the target account's role (assumed via `CLOUDWATCH_ASSUME_ROLE` /
+`CLOUDWATCH_ACCOUNTS` / `AWS_ASSUME_ROLE`, or directly on the pod's IRSA role).
+Scope `Resource` as tightly as your environment allows:
 
 ```json
 {
@@ -170,10 +170,37 @@ tightly as your environment allows:
         "cloudwatch:DescribeAlarmHistory"
       ],
       "Resource": "*"
+    },
+    {
+      "Sid": "DiagnosticBotAWSReadOnly",
+      "Effect": "Allow",
+      "Action": [
+        "sts:GetCallerIdentity",
+        "iam:ListRoles",
+        "iam:GetRole",
+        "ec2:DescribeVpcs",
+        "ec2:DescribeSubnets",
+        "ec2:DescribeSecurityGroups",
+        "ec2:DescribeNatGateways",
+        "route53:ListHostedZones",
+        "route53:ListResourceRecordSets",
+        "s3:ListAllMyBuckets",
+        "s3:GetBucketPolicy",
+        "ecr:DescribeRepositories",
+        "ecr:DescribeImages",
+        "ecr:DescribeImageScanFindings"
+      ],
+      "Resource": "*"
     }
   ]
 }
 ```
+
+The CloudWatch statement backs the Logs/Metrics/Alarms tools; the second backs
+the AWS read tools (`sts_*`, `iam_*`, `ec2_describe_*`, `route53_*`, `s3_*`) and
+ECR scans. The ECR and AWS read tools are gated on `AWS_REGION` /
+`AWS_DEFAULT_REGION` being set, so set one of those in the pod even when
+credentials come from IRSA.
 
 In EKS, attach the role to the bot's ServiceAccount with an
 `eks.amazonaws.com/role-arn` annotation (IRSA). See the Kustomize

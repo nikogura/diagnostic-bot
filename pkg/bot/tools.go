@@ -17,8 +17,12 @@ type ToolConfig struct {
 	PrometheusAvailable bool
 	GrafanaAvailable    bool
 	GitHubAvailable     bool
+	GitLabAvailable     bool
 	DatabaseAvailable   bool
 	ECRAvailable        bool
+	AWSAvailable        bool
+	TempoAvailable      bool
+	GraphQLAvailable    bool
 	K8sAvailable        bool
 	ReadOnly            bool
 	APIToolRegistry     *apiconfig.APIToolRegistry
@@ -30,14 +34,20 @@ type ToolConfig struct {
 // the shared MCP server advertises and dispatches — including the operator's
 // third-party API tools, loaded from the same API_CONFIG_DIR the server reads.
 func NewToolConfig(logger *slog.Logger) (config ToolConfig) {
+	awsConfigured := os.Getenv("AWS_REGION") != "" || os.Getenv("AWS_DEFAULT_REGION") != ""
+
 	config = ToolConfig{
 		LokiAvailable:       os.Getenv("LOKI_ENDPOINT") != "",
 		CloudWatchAvailable: os.Getenv("CLOUDWATCH_ASSUME_ROLE") != "" || os.Getenv("CLOUDWATCH_ACCOUNTS") != "",
 		PrometheusAvailable: hasPrometheusConfig(),
 		GrafanaAvailable:    os.Getenv("GRAFANA_URL") != "" && os.Getenv("GRAFANA_API_KEY") != "",
 		GitHubAvailable:     os.Getenv("GITHUB_TOKEN") != "",
+		GitLabAvailable:     os.Getenv("GITLAB_TOKEN") != "",
 		DatabaseAvailable:   hasDatabaseConfig(),
-		ECRAvailable:        os.Getenv("AWS_REGION") != "" || os.Getenv("AWS_DEFAULT_REGION") != "",
+		ECRAvailable:        awsConfigured,
+		AWSAvailable:        awsConfigured,
+		TempoAvailable:      hasURLEndpointConfig("TEMPO_"),
+		GraphQLAvailable:    hasURLEndpointConfig("GRAPHQL_"),
 		K8sAvailable:        hasK8sConfig(),
 		ReadOnly:            mcp.ReadOnlyEnabled(),
 		APIToolRegistry:     apiconfig.LoadRegistryFromEnv(logger),
@@ -71,6 +81,10 @@ func (tc ToolConfig) WriteToolUsage(builder *strings.Builder, allowed map[string
 		writePrometheusToolUsage(builder, permits)
 	}
 
+	if tc.TempoAvailable {
+		writeTempoToolUsage(builder, permits)
+	}
+
 	if tc.GrafanaAvailable {
 		writeGrafanaToolUsage(builder, permits, tc.ReadOnly)
 	}
@@ -87,8 +101,20 @@ func (tc ToolConfig) WriteToolUsage(builder *strings.Builder, allowed map[string
 		writeGitHubToolUsage(builder, permits)
 	}
 
+	if tc.GitLabAvailable {
+		writeGitLabToolUsage(builder, permits)
+	}
+
 	if tc.ECRAvailable {
 		writeECRToolUsage(builder, permits)
+	}
+
+	if tc.AWSAvailable {
+		writeAWSToolUsage(builder, permits)
+	}
+
+	if tc.GraphQLAvailable {
+		writeGraphQLToolUsage(builder, permits)
 	}
 
 	// Third-party API tools, gated by the same permits check as every other
@@ -118,12 +144,19 @@ func toolLine(b *strings.Builder, permits func(string) bool, name, description s
 
 // hasPrometheusConfig checks if any Prometheus endpoint is configured.
 func hasPrometheusConfig() (available bool) {
-	if os.Getenv("PROMETHEUS_URL") != "" {
+	available = hasURLEndpointConfig("PROMETHEUS_")
+	return available
+}
+
+// hasURLEndpointConfig reports whether <prefix>URL or any <prefix><NAME>_URL env
+// var is set — the endpoint-discovery pattern Prometheus, Tempo, and GraphQL
+// share. The prefix includes the trailing underscore (e.g. "TEMPO_").
+func hasURLEndpointConfig(prefix string) (available bool) {
+	if os.Getenv(prefix+"URL") != "" {
 		available = true
 		return available
 	}
 
-	// Check for PROMETHEUS_<NAME>_URL patterns
 	for _, env := range os.Environ() {
 		parts := strings.SplitN(env, "=", 2)
 		if len(parts) != 2 || parts[1] == "" {
@@ -131,7 +164,7 @@ func hasPrometheusConfig() (available bool) {
 		}
 
 		key := parts[0]
-		if strings.HasPrefix(key, "PROMETHEUS_") && strings.HasSuffix(key, "_URL") && key != "PROMETHEUS_URL" {
+		if strings.HasPrefix(key, prefix) && strings.HasSuffix(key, "_URL") && key != prefix+"URL" {
 			available = true
 			return available
 		}
@@ -290,6 +323,65 @@ func writeECRToolUsage(builder *strings.Builder, permits func(string) bool) {
 	}
 	builder.WriteString("**ECR (Container Security):**\n")
 	builder.WriteString("- `ecr_scan_results`: Query AWS ECR for container image vulnerability scan results\n\n")
+}
+
+func writeGitLabToolUsage(builder *strings.Builder, permits func(string) bool) {
+	var lines strings.Builder
+	toolLine(&lines, permits, "gitlab_get_file", "Fetch a file from a GitLab repository")
+	toolLine(&lines, permits, "gitlab_list_directory", "List files in a GitLab repository directory")
+	toolLine(&lines, permits, "gitlab_search_code", "Search for code across GitLab repositories")
+	if lines.Len() == 0 {
+		return
+	}
+	builder.WriteString("**GitLab:**\n")
+	builder.WriteString(lines.String())
+	builder.WriteString("\n")
+}
+
+func writeTempoToolUsage(builder *strings.Builder, permits func(string) bool) {
+	var lines strings.Builder
+	toolLine(&lines, permits, "tempo_get_trace", "Fetch a distributed trace by ID")
+	toolLine(&lines, permits, "tempo_search_traces", "Search traces by service, span, tags, or duration")
+	toolLine(&lines, permits, "tempo_list_endpoints", "List configured Tempo endpoints")
+	if lines.Len() == 0 {
+		return
+	}
+	builder.WriteString("**Traces (Tempo):**\n")
+	builder.WriteString(lines.String())
+	builder.WriteString("\n")
+}
+
+func writeAWSToolUsage(builder *strings.Builder, permits func(string) bool) {
+	var lines strings.Builder
+	toolLine(&lines, permits, "sts_get_caller_identity", "Show the effective AWS identity (account, ARN)")
+	toolLine(&lines, permits, "iam_list_roles", "List IAM roles")
+	toolLine(&lines, permits, "iam_get_role", "Get an IAM role's trust policy and metadata")
+	toolLine(&lines, permits, "ec2_describe_vpcs", "Describe VPCs")
+	toolLine(&lines, permits, "ec2_describe_subnets", "Describe subnets")
+	toolLine(&lines, permits, "ec2_describe_security_groups", "Describe security groups")
+	toolLine(&lines, permits, "ec2_describe_nat_gateways", "Describe NAT gateways")
+	toolLine(&lines, permits, "route53_list_hosted_zones", "List Route 53 hosted zones")
+	toolLine(&lines, permits, "route53_list_records", "List Route 53 records in a hosted zone")
+	toolLine(&lines, permits, "s3_list_buckets", "List S3 buckets")
+	toolLine(&lines, permits, "s3_get_bucket_policy", "Get an S3 bucket policy")
+	if lines.Len() == 0 {
+		return
+	}
+	builder.WriteString("**AWS (Read-Only):**\n")
+	builder.WriteString(lines.String())
+	builder.WriteString("\n")
+}
+
+func writeGraphQLToolUsage(builder *strings.Builder, permits func(string) bool) {
+	var lines strings.Builder
+	toolLine(&lines, permits, "graphql_query", "Execute a GraphQL query against a configured endpoint")
+	toolLine(&lines, permits, "graphql_list_endpoints", "List configured GraphQL endpoints")
+	if lines.Len() == 0 {
+		return
+	}
+	builder.WriteString("**GraphQL:**\n")
+	builder.WriteString(lines.String())
+	builder.WriteString("\n")
 }
 
 func writeUtilityToolUsage(builder *strings.Builder, permits func(string) bool) {

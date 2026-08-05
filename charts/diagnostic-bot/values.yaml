@@ -13,9 +13,10 @@ fullnameOverride: ""
 serviceAccount:
   create: true
   name: ""
-  # IRSA: annotate with the IAM role to assume for AWS access (ECR scans and the
-  # CloudWatch Logs/Metrics/Alarms tools). The role needs the read-only actions
-  # documented in the README ("CloudWatch IAM Permissions"). Example:
+  # IRSA: annotate with the IAM role to assume for AWS access (ECR scans, the
+  # CloudWatch Logs/Metrics/Alarms tools, and the AWS read tools). The role needs
+  # the read-only actions documented in the README ("AWS IAM Permissions"). Note
+  # ECR and the AWS read tools also require config.AWS_REGION to be set. Example:
   #   annotations:
   #     eks.amazonaws.com/role-arn: arn:aws:iam::111111111111:role/diagnostic-bot-cw-reader
   annotations: {}
@@ -41,10 +42,14 @@ config:
   LOKI_ENDPOINT: ""
   CLAUDE_MODEL: "claude-sonnet-4-5-20250929"
   OTEL_EXPORTER_OTLP_ENDPOINT: ""
+  # AWS region — enables the ECR scan tool and the AWS read tools
+  # (sts/iam/ec2/route53/s3). Required even with IRSA credentials. Leave empty
+  # to disable those families. See the README "AWS IAM Permissions".
+  AWS_REGION: ""
   # CloudWatch Logs, Metrics, and Alarms tools (all read-only). Leave empty to
   # disable. Set ONE of the two styles, and grant the pod AWS credentials via
   # serviceAccount.annotations (IRSA) with the IAM actions documented in the
-  # README ("CloudWatch IAM Permissions"). Empty values are not rendered.
+  # README ("AWS IAM Permissions"). Empty values are not rendered.
   #
   # Multi-account: JSON map of friendly name -> role ARN to assume. Newlines OK.
   CLOUDWATCH_ACCOUNTS: ""

@@ -838,9 +838,20 @@ func (s *Server) getToolDefinitions() (result []MCPTool) {
 		result = append(result, getGitHubTools()...)
 	}
 
-	// ECR uses the default AWS credential chain; include if AWS is configured
-	if os.Getenv("AWS_REGION") != "" || os.Getenv("AWS_DEFAULT_REGION") != "" {
+	// ECR and the AWS read tools share the AWS credential chain; include them
+	// when AWS is configured. awsConfigured() is the identical gate the SDK
+	// transport uses, so both surfaces agree.
+	if awsConfigured() {
 		result = append(result, getECRTools()...)
+		result = append(result, getAWSTools()...)
+	}
+
+	if s.gitlabClient != nil {
+		result = append(result, getGitLabTools()...)
+	}
+
+	if len(s.tempoClients) > 0 {
+		result = append(result, getTempoTools()...)
 	}
 
 	if len(s.dbClients) > 0 {
@@ -875,20 +886,31 @@ func (s *Server) getToolDefinitions() (result []MCPTool) {
 		result = append(result, getGraphQLTools()...)
 	}
 
-	// Add dynamically loaded third-party API tools. In read-only mode, withhold
-	// the write ones (non-GET endpoints), the same posture applied to Grafana
-	// dashboard writes above.
-	if s.apiToolRegistry != nil && s.apiToolRegistry.HasTools() {
-		for _, tool := range s.apiToolRegistry.GetToolDefinitions() {
-			if s.readOnly && s.apiToolRegistry.IsWriteTool(tool.Name) {
-				continue
-			}
-			result = append(result, MCPTool{
-				Name:        tool.Name,
-				Description: tool.Description,
-				InputSchema: tool.InputSchema,
-			})
+	result = s.appendAPIToolDefinitions(result)
+
+	return result
+}
+
+// appendAPIToolDefinitions appends the dynamically loaded third-party API tools
+// to the given slice. In read-only mode it withholds the write ones (non-GET
+// endpoints), the same posture applied to Grafana dashboard writes.
+func (s *Server) appendAPIToolDefinitions(tools []MCPTool) (result []MCPTool) {
+	result = tools
+
+	if s.apiToolRegistry == nil || !s.apiToolRegistry.HasTools() {
+		return result
+	}
+
+	for _, tool := range s.apiToolRegistry.GetToolDefinitions() {
+		if s.readOnly && s.apiToolRegistry.IsWriteTool(tool.Name) {
+			continue
 		}
+
+		result = append(result, MCPTool{
+			Name:        tool.Name,
+			Description: tool.Description,
+			InputSchema: tool.InputSchema,
+		})
 	}
 
 	return result
@@ -1041,18 +1063,115 @@ func (s *Server) dispatchExtendedToolCall(ctx context.Context, toolName string, 
 	case toolK8sGetEvents:
 		result, err = s.executeK8sGetEvents(ctx, args)
 	default:
-		// Try dynamically loaded API tools
-		if s.apiToolRegistry != nil {
-			var handled bool
-			result, handled, err = s.apiToolRegistry.DispatchToolCall(ctx, toolName, args)
-			if handled {
-				return result, err
-			}
-		}
-		err = fmt.Errorf("unknown tool: %s", toolName)
+		result, err = s.dispatchAdditionalToolCall(ctx, toolName, args)
 	}
 
 	return result, err
+}
+
+// dispatchAdditionalToolCall routes GitLab, Tempo, and AWS tools, then falls
+// back to dynamically loaded third-party API tools. Splitting these families
+// out of dispatchExtendedToolCall keeps each switch small enough to satisfy the
+// cyclomatic-complexity budget while still routing every advertised tool.
+func (s *Server) dispatchAdditionalToolCall(ctx context.Context, toolName string, args map[string]interface{}) (result string, err error) {
+	dispatchers := []func(context.Context, string, map[string]interface{}) (string, bool, error){
+		s.dispatchGitLabTool,
+		s.dispatchTempoTool,
+		s.dispatchAWSTool,
+	}
+
+	for _, dispatch := range dispatchers {
+		var handled bool
+		result, handled, err = dispatch(ctx, toolName, args)
+		if handled {
+			return result, err
+		}
+	}
+
+	// Dynamically loaded third-party API tools.
+	if s.apiToolRegistry != nil {
+		var handled bool
+		result, handled, err = s.apiToolRegistry.DispatchToolCall(ctx, toolName, args)
+		if handled {
+			return result, err
+		}
+	}
+
+	err = fmt.Errorf("unknown tool: %s", toolName)
+	return result, err
+}
+
+// dispatchGitLabTool routes GitLab tools. handled reports whether toolName
+// belonged to this family.
+func (s *Server) dispatchGitLabTool(ctx context.Context, toolName string, args map[string]interface{}) (result string, handled bool, err error) {
+	handled = true
+
+	switch toolName {
+	case toolGitLabGetFile:
+		result, err = s.executeGitLabGetFile(ctx, args)
+	case toolGitLabListDirectory:
+		result, err = s.executeGitLabListDirectory(ctx, args)
+	case toolGitLabSearchCode:
+		result, err = s.executeGitLabSearchCode(ctx, args)
+	default:
+		handled = false
+	}
+
+	return result, handled, err
+}
+
+// dispatchTempoTool routes Tempo tools. handled reports whether toolName
+// belonged to this family.
+func (s *Server) dispatchTempoTool(ctx context.Context, toolName string, args map[string]interface{}) (result string, handled bool, err error) {
+	handled = true
+
+	switch toolName {
+	case toolTempoGetTrace:
+		result, err = s.executeTempoGetTrace(ctx, args)
+	case toolTempoSearchTraces:
+		result, err = s.executeTempoSearchTraces(ctx, args)
+	case toolTempoListEndpoints:
+		result, err = s.executeTempoListEndpoints(ctx, args)
+	default:
+		handled = false
+	}
+
+	return result, handled, err
+}
+
+// dispatchAWSTool routes the AWS read tools. handled reports whether toolName
+// belonged to this family.
+func (s *Server) dispatchAWSTool(ctx context.Context, toolName string, args map[string]interface{}) (result string, handled bool, err error) {
+	handled = true
+
+	switch toolName {
+	case toolSTSGetCallerIdentity:
+		result, err = s.executeSTSGetCallerIdentity(ctx, args)
+	case toolIAMListRoles:
+		result, err = s.executeIAMListRoles(ctx, args)
+	case toolIAMGetRole:
+		result, err = s.executeIAMGetRole(ctx, args)
+	case toolEC2DescribeVPCs:
+		result, err = s.executeEC2DescribeVPCs(ctx, args)
+	case toolEC2DescribeSubnets:
+		result, err = s.executeEC2DescribeSubnets(ctx, args)
+	case toolEC2DescribeSecurityGroups:
+		result, err = s.executeEC2DescribeSecurityGroups(ctx, args)
+	case toolEC2DescribeNATGateways:
+		result, err = s.executeEC2DescribeNATGateways(ctx, args)
+	case toolRoute53ListHostedZones:
+		result, err = s.executeRoute53ListHostedZones(ctx, args)
+	case toolRoute53ListRecords:
+		result, err = s.executeRoute53ListRecords(ctx, args)
+	case toolS3ListBuckets:
+		result, err = s.executeS3ListBuckets(ctx, args)
+	case toolS3GetBucketPolicy:
+		result, err = s.executeS3GetBucketPolicy(ctx, args)
+	default:
+		handled = false
+	}
+
+	return result, handled, err
 }
 
 // executeLokiQuery executes a Loki query.

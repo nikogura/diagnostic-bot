@@ -43,11 +43,16 @@ spec:
             # OTLP endpoint is optional; tracing is no-op when unset.
             - name: OTEL_EXPORTER_OTLP_ENDPOINT
               value: "http://tempo-distributor.monitoring.svc:4318"
+            # AWS region — required to enable the ECR scan tool and the AWS read
+            # tools (sts/iam/ec2/route53/s3). Set it even when credentials come
+            # from IRSA. See the README "AWS IAM Permissions" for the actions.
+            # - name: AWS_REGION
+            #   value: "us-east-1"
             # CloudWatch Logs, Metrics, and Alarms tools (all read-only). Enable
             # by giving the pod AWS credentials — the ServiceAccount IRSA role
             # (see serviceaccount.yaml) is the recommended path — and setting one
             # of the two config styles below. Required IAM actions are documented
-            # in the README ("CloudWatch IAM Permissions").
+            # in the README ("AWS IAM Permissions").
             #
             # Multi-account: JSON map of friendly name -> role ARN to assume.
             # - name: CLOUDWATCH_ACCOUNTS
