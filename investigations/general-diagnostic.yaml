@@ -227,4 +227,3 @@ initial_prompt: |
 
 kubernetes_resources: []
 
-require_approval: false

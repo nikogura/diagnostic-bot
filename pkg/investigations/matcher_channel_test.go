@@ -18,7 +18,6 @@ trigger_patterns:
   - "database.*migration"
 initial_prompt: "Test prompt for atlas migrations"
 kubernetes_resources: []
-require_approval: false
 `
 
 	modsecYAML := `name: "ModSecurity Test"
@@ -28,7 +27,6 @@ trigger_patterns:
   - "modsec.*fail"
 initial_prompt: "Test prompt for modsecurity"
 kubernetes_resources: []
-require_approval: false
 `
 
 	podYAML := `name: "Pod Crash Test"
@@ -38,7 +36,6 @@ trigger_patterns:
   - "crashloop"
 initial_prompt: "Test prompt for pod crashes"
 kubernetes_resources: []
-require_approval: false
 `
 
 	generalYAML := `name: "General Diagnostic Test"
@@ -51,7 +48,6 @@ trigger_patterns:
   - "problem"
 initial_prompt: "Test prompt for general diagnostics"
 kubernetes_resources: []
-require_approval: false
 `
 
 	// Write test skills

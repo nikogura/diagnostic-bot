@@ -40,6 +40,16 @@ mcpHttp:
 # accept commas AND newlines, so a YAML block scalar stays readable.
 config:
   LOKI_ENDPOINT: ""
+  # Reference documents carrying environment knowledge, delivered to
+  # BOTH front-ends: inlined into MCP client context at connect, and prepended
+  # to every Slack investigation prompt. Names are file stems from
+  # INVESTIGATION_DIR. Accepts commas and newlines. See the README,
+  # "Context Documents".
+  CONTEXT_DOCUMENTS: ""
+  # Bounds on the Slack reconnection backoff after a fatal connection error.
+  # Empty uses the defaults (1s and 5m).
+  SLACK_RETRY_INITIAL: ""
+  SLACK_RETRY_MAX: ""
   CLAUDE_MODEL: "claude-sonnet-4-5-20250929"
   OTEL_EXPORTER_OTLP_ENDPOINT: ""
   # AWS region — enables the ECR scan tool and the AWS read tools

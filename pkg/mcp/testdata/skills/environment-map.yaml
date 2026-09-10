@@ -1,0 +1,16 @@
+name: "Environment Map"
+description: "Which environment names map to which AWS accounts, clusters and runtimes"
+trigger_patterns: []
+initial_prompt: |
+  ## Environment Topology
+
+  When a human names an environment, it means:
+
+  | They say | AWS account | Runtime | Cluster |
+  | --- | --- | --- | --- |
+  | prod, production | 111111111111 | EKS | prod-use1 |
+  | stage, staging | 222222222222 | EKS | stage-use1 |
+  | dev, sandbox | 333333333333 | ECS | n/a |
+
+  The billing and reporting services run on ECS in 333333333333.
+  Everything else runs on EKS. Do not guess an account number; use this table.

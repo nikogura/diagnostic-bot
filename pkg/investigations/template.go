@@ -70,11 +70,88 @@ type InvestigationSkill struct {
 	TriggerPatterns     []string      `yaml:"trigger_patterns"`
 	InitialPrompt       string        `yaml:"initial_prompt"`
 	KubernetesResources []K8sResource `yaml:"kubernetes_resources,omitempty"`
-	ContextDocuments    []string      `yaml:"context_documents,omitempty"`
-	RequireApproval     bool          `yaml:"require_approval"`
+
+	// Document marks content loaded from a plain Markdown file rather than a
+	// skill definition. Documents carry no trigger patterns, so they never
+	// start an investigation; they exist to be loaded as context documents
+	// or fetched by name.
+	Document bool `yaml:"-"`
 
 	// Computed fields
 	triggerRegexes []*regexp.Regexp
+}
+
+// LoadDocument loads a plain Markdown file as reference material.
+//
+// Operators already keep this knowledge as documents — environment maps,
+// account topologies, naming conventions — and requiring them to be re-wrapped
+// in a YAML string block is friction that earns nothing. A document is a skill
+// with no trigger patterns and the file's text as its prompt, so it can be
+// loaded as a context document or fetched by name, but can never start an
+// investigation on its own.
+func LoadDocument(filePath string) (result *InvestigationSkill, err error) {
+	var data []byte
+
+	data, err = os.ReadFile(filePath)
+	if err != nil {
+		err = fmt.Errorf("reading document file: %w", err)
+		return result, err
+	}
+
+	text := string(data)
+
+	result = &InvestigationSkill{
+		Name:           documentTitle(filePath, text),
+		Description:    documentSummary(text),
+		InitialPrompt:  text,
+		Document:       true,
+		triggerRegexes: []*regexp.Regexp{},
+	}
+
+	return result, err
+}
+
+// documentTitle uses the document's first level-one heading as its name,
+// falling back to a readable form of the file name.
+func documentTitle(filePath string, text string) (title string) {
+	for _, line := range strings.Split(text, "\n") {
+		trimmed := strings.TrimSpace(line)
+		if strings.HasPrefix(trimmed, "# ") {
+			title = strings.TrimSpace(strings.TrimPrefix(trimmed, "# "))
+			return title
+		}
+	}
+
+	stem := strings.TrimSuffix(filepath.Base(filePath), filepath.Ext(filePath))
+	title = strings.TrimSpace(strings.ReplaceAll(stem, "-", " "))
+
+	return title
+}
+
+// documentSummary uses the first non-heading, non-empty line as a one-line
+// description, so the digest says something specific about the document.
+func documentSummary(text string) (summary string) {
+	for _, line := range strings.Split(text, "\n") {
+		trimmed := strings.TrimSpace(line)
+		if trimmed == "" || strings.HasPrefix(trimmed, "#") || strings.HasPrefix(trimmed, ">") {
+			continue
+		}
+
+		summary = trimmed
+
+		break
+	}
+
+	const maxSummary = 200
+	if len(summary) > maxSummary {
+		summary = summary[:maxSummary] + "…"
+	}
+
+	if summary == "" {
+		summary = "reference document"
+	}
+
+	return summary
 }
 
 // LoadSkill loads an investigation skill from a YAML file.
@@ -185,7 +262,7 @@ func NewSkillLibrary(skillsDir string) (result *SkillLibrary, err error) {
 	}
 
 	for _, entry := range entries {
-		if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".yaml") {
+		if entry.IsDir() || !isLoadable(entry.Name()) {
 			continue
 		}
 
@@ -193,7 +270,7 @@ func NewSkillLibrary(skillsDir string) (result *SkillLibrary, err error) {
 
 		var skill *InvestigationSkill
 
-		skill, err = LoadSkill(filePath)
+		skill, err = loadEntry(filePath)
 		if err != nil {
 			err = fmt.Errorf("loading skill %s: %w", entry.Name(), err)
 			return result, err
@@ -201,6 +278,17 @@ func NewSkillLibrary(skillsDir string) (result *SkillLibrary, err error) {
 
 		// Map filename to investigation type
 		investigationType := inferTypeFromFilename(entry.Name())
+
+		// Two files claiming one type means the second silently replaces the
+		// first. Refuse rather than serve a library that quietly lost content.
+		_, taken := lib.skills[investigationType]
+		if taken {
+			err = fmt.Errorf("two skill files both resolve to investigation type %q; rename one (%s)",
+				investigationType, entry.Name())
+
+			return result, err
+		}
+
 		lib.skills[investigationType] = skill
 	}
 
@@ -210,6 +298,32 @@ func NewSkillLibrary(skillsDir string) (result *SkillLibrary, err error) {
 	}
 
 	result = lib
+	return result, err
+}
+
+// isLoadable reports whether a directory entry is a skill definition or a
+// reference document.
+func isLoadable(name string) (loadable bool) {
+	switch strings.ToLower(filepath.Ext(name)) {
+	case ".yaml", ".yml", ".md", ".markdown":
+		loadable = true
+	default:
+		loadable = false
+	}
+
+	return loadable
+}
+
+// loadEntry loads a file as either a skill definition or a plain document,
+// according to its extension.
+func loadEntry(filePath string) (result *InvestigationSkill, err error) {
+	switch strings.ToLower(filepath.Ext(filePath)) {
+	case ".md", ".markdown":
+		result, err = LoadDocument(filePath)
+	default:
+		result, err = LoadSkill(filePath)
+	}
+
 	return result, err
 }
 
@@ -301,8 +415,27 @@ func inferTypeFromFilename(filename string) (result InvestigationType) {
 	case strings.Contains(filename, "general"):
 		result = InvestigationTypeGeneralDiagnostic
 	default:
-		result = InvestigationTypeUnknown
+		// Anything the operator wrote themselves is identified by its own file
+		// name. Returning a shared constant here would key every unrecognised
+		// skill to the same map entry, so a directory of operator-authored
+		// playbooks would silently collapse to whichever one loaded last.
+		result = typeFromStem(filename)
 	}
+
+	return result
+}
+
+// typeFromStem derives a stable investigation type from a file name.
+func typeFromStem(filename string) (result InvestigationType) {
+	stem := strings.TrimSuffix(filepath.Base(filename), filepath.Ext(filename))
+	stem = strings.TrimSpace(stem)
+
+	if stem == "" {
+		result = InvestigationTypeUnknown
+		return result
+	}
+
+	result = InvestigationType(stem)
 
 	return result
 }

@@ -81,11 +81,7 @@ kubernetes_resources:
     namespace: "ingress-nginx"
     name: "modsecurity-rules"
 
-context_documents:
-  - "docs/modsecurity-tuning.md"
-  - "docs/common-false-positives.md"
 
-require_approval: false  # Set true for production log access
 ```
 
 ### 3. Claude API Integration
@@ -210,7 +206,11 @@ Use environment variables:
 - `SLACK_APP_TOKEN` - App-level token (for Socket Mode)
 - `ANTHROPIC_API_KEY` - Claude API key
 - `KUBECONFIG` - Path to kubeconfig (or use in-cluster config)
-- `INVESTIGATION_DIR` - Path to investigation templates (default: ./investigations)
+- `INVESTIGATION_DIR` - Path to investigation skills and reference documents (default: ./investigations). Loads `.yaml`, `.yml`, `.md` and `.markdown`; Markdown files are reference documents with no trigger patterns.
+- Investigations are authorized under an `investigation:<name>` prefix in the authz policy. This filters visibility, not just execution: a caller without the permission does not see the investigation listed, cannot be routed to it, and receives an identical error for a denied and a nonexistent name.
+- `CONTEXT_DOCUMENTS` - Comma- or newline-separated names of reference documents (not procedures) carrying environment knowledge. Delivered to BOTH front-ends: inlined into MCP `instructions` at connect, and prepended to every Slack investigation prompt. Names are file stems.
+- `SLACK_RETRY_INITIAL` - First delay before reconnecting after a fatal Slack error (default: 1s)
+- `SLACK_RETRY_MAX` - Ceiling on the Slack reconnection backoff (default: 5m)
 - `CLAUDE_MD_PATH` - Path to CLAUDE.md (default: ./docs/CLAUDE.md)
 
 ## Error Handling

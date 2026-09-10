@@ -172,4 +172,3 @@ kubernetes_resources:
     namespace: "flux-system"
     selector: "app=kustomize-controller"
 
-require_approval: false

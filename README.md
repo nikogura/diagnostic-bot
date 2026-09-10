@@ -63,7 +63,99 @@ initial_prompt: |
 | `trigger_patterns` | Regexes matched against the request to select the skill |
 | `initial_prompt` | Investigation instructions and methodology |
 
+A skill is identified by its file name — `waf-block.yaml` is the investigation `waf-block` — and that name is what the `get_investigation` tool takes. Two files that resolve to the same name are a startup error rather than a silent overwrite.
+
 Four example skills ship in `investigations/`: `modsecurity-block`, `atlas-migration`, `ecr-vulnerability-scan`, and `general-diagnostic`. They contain substitution placeholders for adapting to a specific environment.
+
+### Reference Documents
+
+Plain Markdown files in the same directory are loaded as reference material. Drop `environment-mapping-table.md` in beside the skills and it is available as the document `environment-mapping-table` — no YAML wrapper, no `initial_prompt` block. The first `#` heading becomes its title and the first prose line its summary.
+
+Documents carry no `trigger_patterns`, so they never start an investigation. They exist to be preloaded into MCP clients or fetched by name. This is for the knowledge an operator already keeps as a document: environment maps, account topology, naming conventions, the traps that catch newcomers.
+
+## Slack Resilience
+
+A fatal Slack error — a rejected handshake, a bad token, a sustained outage — does not end the process. The connection is retried with exponential backoff between `SLACK_RETRY_INITIAL` and `SLACK_RETRY_MAX`, the backoff resets once a connection has held for two minutes so a later outage starts fresh, and `slack_reconnects_total` counts the attempts.
+
+Meanwhile the MCP tool surface and the metrics endpoint keep serving: neither depends on Slack. Readiness reports the socket as disconnected throughout, so the pod is honestly degraded rather than pretending. Exiting instead would drop two healthy listeners and land the pod in CrashLoopBackOff, which fixes nothing.
+
+## Context Documents
+
+Some knowledge applies to every question asked of this deployment: which AWS account holds staging, which cluster serves a realm, what the humans here call each environment. A playbook that says "query staging" is ambiguous without it, and guessing wrong is the failure that knowledge exists to prevent.
+
+A **context document** is reference material rather than a procedure. It carries no `trigger_patterns`, so it is never matched or run — it is simply present, so that whatever is asked, the model already knows which account "staging" means. That is the opposite of an investigation, which is a procedure fetched only when it applies.
+
+`CONTEXT_DOCUMENTS` names the documents to load. **Both front-ends receive them**, rendered from one place so they cannot drift:
+
+- **MCP clients** get it in the server's `instructions`, which clients fold into the model's context during `initialize`. No slash command, no tool call, no user action — a locally started agent arrives already oriented instead of rediscovering the environment every session.
+- **Slack investigations** get it prepended to the system prompt, ahead of the matched playbook, so the playbook's references resolve against real accounts and clusters.
+
+A question asked in Slack and the same question asked through MCP are therefore answered against identical facts.
+
+```bash
+CONTEXT_DOCUMENTS=environment-mapping-table,account-topology
+```
+
+```yaml
+# Accepts commas AND newlines, so a block scalar stays readable.
+CONTEXT_DOCUMENTS: |
+  environment-mapping-table
+  account-topology
+```
+
+The instructions do **not** list the available investigations. That is deliberate — see [Investigation Visibility](#investigation-visibility). They point the client at `match_investigation` and `list_investigations`, which run per request and return only what that caller is permitted to see.
+
+### What Belongs Here
+
+Orientation, not procedure. Environment vocabulary, account and cluster topology, naming conventions — short, always relevant, and useless if the agent has to know to ask.
+
+Naming an investigation here works mechanically but is usually the wrong call: a full playbook then occupies every context window whether or not it is relevant, which is exactly what the digest and `get_investigation` exist to avoid.
+
+Instructions are delivered once per connection and then occupy every context window that client opens, so they are charged for whether or not they are read. The assembled text is capped at 24 KB. Anything that does not fit is **omitted and logged as an error**, never truncated — half an environment map reads as authoritative and is quietly wrong. A configured name that matches no skill is likewise logged as an error rather than passed over, because the failure is otherwise invisible: the operator believes they published something the agent never received.
+
+Instructions are served at `initialize` and are identical for every caller, so they cannot be scoped per principal. Connection is still gated by the MCP transport's authentication, but treat anything preloaded as visible to every authenticated client. `get_investigation` goes through the normal per-tool authorization.
+
+## Running Investigations From An MCP Client
+
+A Slack user describes a problem and is routed to the right procedure without knowing its name. MCP clients get the same three steps, and run the investigation themselves with this server's tools:
+
+| Tool | Purpose |
+|------|---------|
+| `match_investigation` | Describe the problem in plain language; get the matching procedure back, ready to follow. Same matcher the Slack front-end uses. |
+| `list_investigations` | What this deployment has, with the terms that signal each. |
+| `get_investigation` | Fetch one by name. |
+
+The returned procedure is assembled by the same code that builds the Slack prompt, so both front-ends carry identical instructions: the operator's procedure, the expected report structure, and the rule that tool output is untrusted data rather than instructions. A local agent querying the same logs faces the same prompt-injection risk a Slack investigation does; a guardrail on one path and not the other is worse than none, because the gap is invisible.
+
+The local agent executes. The server does not run a second model on its behalf — the client already has one, and the toolset is identical either way.
+
+### Investigation Visibility
+
+Investigations are authorized like tools, under an `investigation:` prefix:
+
+```yaml
+authz:
+  default: deny
+  roles:
+    responder:
+      tools:
+        - "investigation:*"
+    engineer:
+      tools:
+        - "investigation:waf-block"
+        - "investigation:environment-map"
+```
+
+This filters **visibility**, not just execution. A procedure's name, its description and the vocabulary that reaches it all describe what an organisation monitors and worries about — a `security-incident` playbook discloses that such triage exists here and roughly what it covers. A caller without the permission does not learn it exists:
+
+- It is absent from `list_investigations`.
+- `match_investigation` will not route to it, even for a phrase that reaches it.
+- `get_investigation` reports it exactly as it reports a misspelling. A refusal worded differently from a miss would confirm the existence of everything it refused.
+- The `available:` hint in those errors names only what the caller may see.
+
+With no policy loaded, everything is visible — the same way tool authorization already behaves.
+
+The context documents in `CONTEXT_DOCUMENTS` are the exception: they are delivered in the MCP `instructions`, which are returned once at initialize as a single static string identical for every caller. They cannot be filtered per principal. Connection is still gated by the transport's authentication, but treat anything named there as visible to every authenticated client, and keep genuinely restricted material in a permission-gated investigation instead.
 
 ## Third-Party API Integrations
 
@@ -91,9 +183,12 @@ All configuration is via environment variables.
 |----------|---------|---------|
 | `CLAUDE_MODEL` | `claude-sonnet-4-5-20250929` | Model used for investigations |
 | `READ_ONLY` | `false` | When `true`/`1`/`yes`/`on`, disables all write tools (Grafana) on both interfaces |
-| `INVESTIGATION_DIR` | `./investigations` | Skill directory |
+| `INVESTIGATION_DIR` | `./investigations` | Skill and reference-document directory (`.yaml`, `.yml`, `.md`, `.markdown`) |
+| `CONTEXT_DOCUMENTS` | *(none)* | Reference material always present in both front-ends: inlined into MCP client context at connect, and prepended to every Slack investigation. Names are file stems. Accepts commas **and** newlines. See [Context Documents](#context-documents) |
 | `COMPANY_NAME` | `Company` | Branding on PDF reports |
 | `FILE_RETENTION` | `24h` | Generated-file cleanup interval |
+| `SLACK_RETRY_INITIAL` | `1s` | First delay before reconnecting after a fatal Slack error |
+| `SLACK_RETRY_MAX` | `5m` | Ceiling on the Slack reconnection backoff |
 | `API_CONFIG_DIR` | `./apis` | Third-party API config directory |
 | `API_ALLOWED_METHODS` | `GET` | HTTP methods third-party API tools may use. GET is always allowed; add write verbs (e.g. `POST,PATCH`) to enable write endpoints. Accepts commas **and** newlines. `READ_ONLY` still overrides. |
 | `PDF_FONT` | `helvetica` | Report font: `helvetica`, `times`, or `courier` (code blocks are always monospace) |

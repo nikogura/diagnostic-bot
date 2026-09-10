@@ -79,7 +79,6 @@ initial_prompt: "Test prompt"
 kubernetes_resources:
   - type: "logs"
     namespace: "test"
-require_approval: false
 `,
 			wantErr:   false,
 			checkFunc: checkModSecurityTemplate,

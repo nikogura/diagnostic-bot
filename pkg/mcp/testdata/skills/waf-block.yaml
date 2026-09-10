@@ -1,0 +1,9 @@
+name: "WAF Block Diagnosis"
+description: "Diagnoses WAF blocks and recommends remediation"
+trigger_patterns:
+  - "modsec"
+  - "waf.*block"
+  - "403.*waf"
+initial_prompt: |
+  Query Loki for ModSecurity 403s, categorize each block as false positive,
+  legitimate block, or targeted attack, then produce a report.

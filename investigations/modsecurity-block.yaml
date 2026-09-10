@@ -108,4 +108,3 @@ kubernetes_resources:
     grep: "ModSecurity"
     tail_lines: 500
 
-require_approval: false

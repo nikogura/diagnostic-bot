@@ -1,0 +1,8 @@
+name: "Security Incident Triage"
+description: "Triage a suspected security incident and assemble the evidence timeline"
+trigger_patterns:
+  - "breach"
+  - "incident"
+  - "compromise"
+initial_prompt: |
+  Assemble the evidence timeline for a suspected compromise.

@@ -14,6 +14,7 @@ import (
 	"github.com/google/go-github/v57/github"
 	"github.com/nikogura/diagnostic-bot/pkg/apiconfig"
 	"github.com/nikogura/diagnostic-bot/pkg/authz"
+	"github.com/nikogura/diagnostic-bot/pkg/investigations"
 	"github.com/nikogura/diagnostic-bot/pkg/k8s"
 	"golang.org/x/oauth2"
 )
@@ -64,10 +65,14 @@ type Server struct {
 	k8sClusters                    map[string]*k8s.Agent
 	logger                         *slog.Logger
 	companyName                    string
-	auditUser                      string
-	readOnly                       bool
-	maxToolOutputBytes             int
-	authorizer                     *authz.Policy
+
+	// skillLibrary is the operator's investigation playbooks, shared with the
+	// Slack front-end so both surfaces serve identical knowledge.
+	skillLibrary       *investigations.SkillLibrary
+	auditUser          string
+	readOnly           bool
+	maxToolOutputBytes int
+	authorizer         *authz.Policy
 }
 
 // NewServer creates a new MCP server.
@@ -834,6 +839,9 @@ func (s *Server) getToolDefinitions() (result []MCPTool) {
 	// Utility tools (whois, PDF) are always available
 	result = append(result, getUtilityTools()...)
 
+	// The operator's own written procedures, when any are loaded.
+	result = append(result, getInvestigationTools(s.skillLibrary)...)
+
 	if s.githubClient != nil {
 		result = append(result, getGitHubTools()...)
 	}
@@ -1019,9 +1027,16 @@ func (s *Server) DispatchTool(ctx context.Context, name string, args map[string]
 	return result, err
 }
 
-// dispatchExtendedToolCall handles CloudWatch, Prometheus, and GraphQL tool dispatch.
+// dispatchExtendedToolCall handles CloudWatch, Prometheus, GraphQL and
+// investigation tool dispatch.
 func (s *Server) dispatchExtendedToolCall(ctx context.Context, toolName string, args map[string]interface{}) (result string, err error) {
 	switch toolName {
+	case toolGetInvestigation:
+		result, err = s.executeGetInvestigation(ctx, args)
+	case toolMatchInvestigation:
+		result, err = s.executeMatchInvestigation(ctx, args)
+	case toolListInvestigations:
+		result, err = s.executeListInvestigations(ctx, args)
 	case toolCloudWatchLogsQuery:
 		result, err = s.executeCloudWatchLogsQuery(ctx, args)
 	case toolCloudWatchLogsListGroups:
@@ -2056,4 +2071,19 @@ func (s *Server) executeGrafanaDeleteDashboard(ctx context.Context, args map[str
 
 	result = fmt.Sprintf("Successfully deleted dashboard with UID: %s", uid)
 	return result, err
+}
+
+// SetSkillLibrary attaches the operator's investigation playbooks.
+//
+// The library is loaded once and shared with the Slack front-end rather than
+// read twice, so the two surfaces cannot drift apart: whatever an operator
+// writes is what both a Slack user and an MCP client receive.
+func (s *Server) SetSkillLibrary(library *investigations.SkillLibrary) {
+	s.skillLibrary = library
+}
+
+// SkillLibrary returns the attached investigation playbooks, or nil.
+func (s *Server) SkillLibrary() (library *investigations.SkillLibrary) {
+	library = s.skillLibrary
+	return library
 }

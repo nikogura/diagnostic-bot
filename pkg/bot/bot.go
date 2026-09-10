@@ -28,6 +28,17 @@ const (
 
 	// DefaultFileRetention is how long to keep generated files before deletion.
 	DefaultFileRetention = 24 * time.Hour
+
+	// DefaultSlackRetryInitial and DefaultSlackRetryMax bound the exponential
+	// backoff between Slack socket-mode reconnection attempts.
+	DefaultSlackRetryInitial = 1 * time.Second
+	DefaultSlackRetryMax     = 5 * time.Minute
+
+	// slackStableRun is how long a connection must survive before its failure
+	// is treated as a fresh incident rather than a continuing one. Without
+	// this, a connection that works for hours and then drops would resume at
+	// whatever backoff the last outage ended on.
+	slackStableRun = 2 * time.Minute
 )
 
 // Bot represents the Slack diagnostic bot.
@@ -47,6 +58,8 @@ type Bot struct {
 	// Health tracking
 	healthMu        sync.RWMutex
 	socketConnected bool
+	retryInitial    time.Duration
+	retryMax        time.Duration
 	lastEventTime   time.Time
 }
 
@@ -60,6 +73,22 @@ type Config struct {
 	GitHubToken      string        // GitHub personal access token for repository access
 	ClaudeModel      string        // Claude model to use (e.g., "claude-sonnet-4-5-20250929")
 	PDFDisabled      bool          // Globally disable PDF report generation
+
+	// SlackRetryInitial and SlackRetryMax bound the reconnection backoff.
+	// Zero uses the defaults.
+	SlackRetryInitial time.Duration
+	SlackRetryMax     time.Duration
+
+	// SkillLibrary is the shared investigation library. When nil the bot loads
+	// its own from InvestigationDir; supplying it lets the MCP surface and the
+	// Slack surface serve the same objects rather than two independent reads.
+	SkillLibrary *investigations.SkillLibrary
+
+	// ContextDocuments names the documents and documents whose full text is
+	// prepended to every investigation prompt. The same list drives the MCP
+	// server's instructions, so both front-ends carry one picture of the
+	// environment.
+	ContextDocuments []string
 }
 
 // NewBot creates a new diagnostic bot. The toolServer is the single in-process
@@ -69,8 +98,13 @@ func NewBot(cfg Config, toolServer ToolDispatcher, logger *slog.Logger) (result 
 	var skillLibrary *investigations.SkillLibrary
 	var authResp *slack.AuthTestResponse
 
-	// Load investigation skills
-	skillLibrary, err = investigations.NewSkillLibrary(cfg.InvestigationDir)
+	// Use the shared library when one was supplied, so the Slack and MCP
+	// surfaces serve the same objects; otherwise load our own.
+	skillLibrary = cfg.SkillLibrary
+	if skillLibrary == nil {
+		skillLibrary, err = investigations.NewSkillLibrary(cfg.InvestigationDir)
+	}
+
 	if err != nil {
 		err = fmt.Errorf("loading investigation skills: %w", err)
 		return result, err
@@ -98,6 +132,15 @@ func NewBot(cfg Config, toolServer ToolDispatcher, logger *slog.Logger) (result 
 	model := claude.NewClient(cfg.AnthropicAPIKey, cfg.ClaudeModel, logger)
 	runner := NewInvestigationRunner(model, toolServer, logger)
 
+	// The same operator knowledge the MCP transport publishes in its server
+	// instructions is prepended to every Slack investigation, so a question
+	// asked in Slack and one asked through MCP are answered against identical
+	// facts about this environment.
+	knowledge := investigations.RenderContext(skillLibrary, cfg.ContextDocuments, 0)
+	runner.SetKnowledge(knowledge.Text)
+
+	logKnowledge(logger, knowledge)
+
 	// Get bot user ID
 	authResp, err = slackClient.AuthTest()
 	if err != nil {
@@ -123,12 +166,15 @@ func NewBot(cfg Config, toolServer ToolDispatcher, logger *slog.Logger) (result 
 		botUserID:     authResp.UserID,
 		fileRetention: fileRetention,
 		pdfDisabled:   cfg.PDFDisabled,
+		retryInitial:  orDuration(cfg.SlackRetryInitial, DefaultSlackRetryInitial),
+		retryMax:      orDuration(cfg.SlackRetryMax, DefaultSlackRetryMax),
 	}
 
 	return result, err
 }
 
-// Start starts the bot and begins listening for events.
+// Start starts the bot and begins listening for events. It returns only when
+// the context is cancelled, and returns nil on that graceful shutdown.
 func (b *Bot) Start(ctx context.Context) (err error) {
 	b.logger.InfoContext(ctx, "starting diagnostic bot",
 		slog.String("bot_user_id", b.botUserID))
@@ -139,14 +185,97 @@ func (b *Bot) Start(ctx context.Context) (err error) {
 	// Handle socket mode events
 	b.safeGo(ctx, "socket_mode", func() { b.handleSocketMode(ctx) })
 
-	// Run socket mode client
-	err = b.socketClient.RunContext(ctx)
-	if err != nil {
-		err = fmt.Errorf("running socket mode client: %w", err)
-		return err
-	}
+	err = b.runSocketMode(ctx)
 
 	return err
+}
+
+// runSocketMode keeps the Slack connection up for the life of the context.
+//
+// RunContext retries transient disconnects internally and returns only on a
+// fatal error, so a return here means Slack is unusable — a bad token, a
+// rejected handshake, a sustained outage. That is a dependency failure, not a
+// reason to end the process: the MCP tool surface and the metrics endpoint are
+// independent of Slack and stay useful while it is down.
+//
+// So the connection is retried with exponential backoff, IsSocketConnected
+// reports false meanwhile so readiness tells the truth, and the bot recovers on
+// its own when Slack returns. Exiting instead would drop two healthy listeners
+// and land the pod in CrashLoopBackOff, which fixes nothing.
+func (b *Bot) runSocketMode(ctx context.Context) (err error) {
+	err = b.reconnectLoop(ctx, b.socketClient)
+	return err
+}
+
+// socketRunner is the sliver of the Slack socket-mode client the reconnect
+// loop depends on. Taking the interface rather than the concrete client is what
+// lets the retry behaviour be tested without a Slack connection.
+type socketRunner interface {
+	RunContext(ctx context.Context) (err error)
+}
+
+// reconnectLoop runs the socket client, retrying until the context is done.
+func (b *Bot) reconnectLoop(ctx context.Context, runner socketRunner) (err error) {
+	delay := b.retryInitial
+
+	for {
+		started := time.Now()
+		runErr := runner.RunContext(ctx)
+		lasted := time.Since(started)
+
+		b.setSocketConnected(false)
+
+		// A cancelled context is a graceful shutdown, not a failure, so the
+		// error RunContext returned is discarded rather than reported.
+		if contextDone(ctx) {
+			b.logger.InfoContext(ctx, "slack socket mode stopped")
+			return err
+		}
+
+		// A connection that stayed up is a new incident, not a continuing one.
+		if lasted >= slackStableRun {
+			delay = b.retryInitial
+		}
+
+		metrics.RecordSlackReconnect(ctx)
+
+		b.logger.ErrorContext(ctx, "slack socket mode ended; retrying",
+			slog.String("error", errorText(runErr)),
+			slog.Duration("connected_for", lasted.Round(time.Second)),
+			slog.Duration("retry_in", delay))
+
+		select {
+		case <-ctx.Done():
+			return err
+		case <-time.After(delay):
+		}
+
+		delay *= 2
+		if delay > b.retryMax {
+			delay = b.retryMax
+		}
+	}
+}
+
+// contextDone reports whether the context has been cancelled or has expired.
+// Expressed as a predicate rather than an error comparison because the answer
+// drives a shutdown decision, not error handling: the caller is asking whether
+// to stop, not whether something went wrong.
+func contextDone(ctx context.Context) (done bool) {
+	done = ctx.Err() != nil
+	return done
+}
+
+// errorText renders an error for logging, tolerating a nil.
+func errorText(err error) (text string) {
+	if err == nil {
+		text = "none"
+		return text
+	}
+
+	text = err.Error()
+
+	return text
 }
 
 // handleSocketMode handles incoming socket mode events.
@@ -399,4 +528,29 @@ func (b *Bot) recordEvent() {
 	defer b.healthMu.Unlock()
 
 	b.lastEventTime = time.Now()
+}
+
+// orDuration returns value when set, otherwise fallback.
+func orDuration(value time.Duration, fallback time.Duration) (result time.Duration) {
+	result = value
+	if result <= 0 {
+		result = fallback
+	}
+
+	return result
+}
+
+// logKnowledge reports what operator knowledge reached the Slack front-end, and
+// says so out loud when a configured name was wrong. A misnamed preload is
+// otherwise invisible: the operator believes they published something that no
+// investigation ever receives.
+func logKnowledge(logger *slog.Logger, knowledge investigations.Context) {
+	logger.Info("investigation prompts carry operator knowledge",
+		slog.Int("documents", len(knowledge.Names)),
+		slog.Int("bytes", len(knowledge.Text)))
+
+	if len(knowledge.Missing) > 0 {
+		logger.Error("configured context document does not exist; Slack investigations will not receive it",
+			slog.Any("missing", knowledge.Missing))
+	}
 }

@@ -41,6 +41,7 @@ var (
 	investigationsInFlight metric.Int64UpDownCounter
 	panicsRecovered        metric.Int64Counter
 	authzDecisions         metric.Int64Counter
+	slackReconnects        metric.Int64Counter
 
 	// conversationsActiveValue backs the conversations_active observable gauge.
 	conversationsActiveValue atomic.Int64
@@ -96,6 +97,10 @@ func Init(meter metric.Meter) (err error) {
 		metric.WithDescription("Total panics recovered in spawned goroutines, by site (self-heal; should stay flat at zero)"))
 	errs = append(errs, err)
 
+	slackReconnects, err = meter.Int64Counter("slack_reconnects_total",
+		metric.WithDescription("Total Slack socket-mode reconnection attempts after a fatal connection error. A climbing rate means Slack is unreachable and the bot is self-healing rather than exiting; sustained growth warrants a look at the token or Slack's status."))
+	errs = append(errs, err)
+
 	authzDecisions, err = meter.Int64Counter("authz_decisions_total",
 		metric.WithDescription("Total tool-authorization decisions, by outcome (allow/deny) and front-end source"))
 	errs = append(errs, err)
@@ -105,6 +110,15 @@ func Init(meter metric.Meter) (err error) {
 
 	err = errors.Join(errs...)
 	return err
+}
+
+// RecordSlackReconnect records one Slack socket-mode reconnection attempt.
+func RecordSlackReconnect(ctx context.Context) {
+	if slackReconnects == nil {
+		return
+	}
+
+	slackReconnects.Add(ctx, 1)
 }
 
 // registerConversationsActive registers the observable gauge that reports the

@@ -17,6 +17,7 @@ import (
 
 	"github.com/nikogura/diagnostic-bot/pkg/apiconfig"
 	"github.com/nikogura/diagnostic-bot/pkg/bot"
+	"github.com/nikogura/diagnostic-bot/pkg/investigations"
 	"github.com/nikogura/diagnostic-bot/pkg/k8s"
 	"github.com/nikogura/diagnostic-bot/pkg/mcp"
 	"github.com/nikogura/diagnostic-bot/pkg/mcp/auth"
@@ -50,16 +51,7 @@ func main() {
 	slog.SetDefault(logger)
 
 	// Load configuration from environment
-	cfg := bot.Config{
-		SlackBotToken:    getEnv("SLACK_BOT_TOKEN", ""),
-		SlackAppToken:    getEnv("SLACK_APP_TOKEN", ""),
-		AnthropicAPIKey:  getEnv("ANTHROPIC_API_KEY", ""),
-		InvestigationDir: getEnv("INVESTIGATION_DIR", "./investigations"),
-		FileRetention:    parseFileRetention(logger),
-		GitHubToken:      getEnv("GITHUB_TOKEN", ""),
-		ClaudeModel:      getEnv("CLAUDE_MODEL", "claude-sonnet-4-5-20250929"),
-		PDFDisabled:      isTruthy(getEnv("PDF_DISABLED", "")),
-	}
+	cfg := loadConfig(logger)
 
 	// Validate required configuration
 	if cfg.SlackBotToken == "" {
@@ -113,7 +105,11 @@ func main() {
 	// shared by both front-ends: the HTTP MCP server (power users with their
 	// own claude-code) and the Slack agent loop (everyone else). One brain,
 	// two doors, one gated toolset.
+	// The investigation playbooks are loaded once and shared by both
+	// front-ends, so a Slack user and an MCP client are served the same
+	// knowledge from the same files.
 	toolServer := buildToolServer(ctx, cfg.GitHubToken, logger)
+	cfg.SkillLibrary = attachSkillLibrary(ctx, toolServer, cfg.InvestigationDir, logger)
 
 	// Start MCP HTTP server unconditionally if enabled — independent of Slack
 	startMCPHTTPServer(ctx, toolServer, logger)
@@ -143,16 +139,25 @@ func main() {
 		}
 	}()
 
-	// Wait for shutdown signal or error
+	// Wait for shutdown. A bot error is logged but does not end the process:
+	// Start now retries the Slack connection itself and returns only when the
+	// context is cancelled, so an error here means Slack is unusable rather
+	// than that the service is. The MCP tool surface and the metrics endpoint
+	// do not depend on Slack, and readiness already reports the socket as
+	// disconnected, so the honest response is to keep serving and recover —
+	// not to exit and drop two working listeners.
 	select {
 	case sig := <-sigChan:
 		logger.Info("received shutdown signal", slog.String("signal", sig.String()))
 		cancel()
 
 	case botErr := <-errChan:
-		logger.Error("bot encountered fatal error", slog.String("error", botErr.Error()))
+		logger.Error("slack front-end stopped; MCP and metrics remain available",
+			slog.String("error", botErr.Error()))
+
+		<-sigChan
+		logger.Info("received shutdown signal")
 		cancel()
-		os.Exit(1)
 	}
 
 	logger.Info("bot shutdown complete")
@@ -303,7 +308,11 @@ func startMCPHTTPServer(ctx context.Context, toolServer *mcp.Server, logger *slo
 	mcpHTTPPort := getEnv("MCP_HTTP_PORT", "8090")
 	mcpHTTPAddr := ":" + mcpHTTPPort
 
-	sdkServer := mcp.NewSDKServer(toolServer)
+	// CONTEXT_DOCUMENTS names the playbooks inlined into every MCP
+	// client's context at connect. Orientation belongs here — environment
+	// vocabulary, account and cluster topology — not long diagnostic
+	// procedures, which clients fetch on demand instead.
+	sdkServer := mcp.NewSDKServerWithContext(toolServer, splitCSV(os.Getenv("CONTEXT_DOCUMENTS")))
 
 	mcpHandler := mcp.WithAuditSourceMiddleware(sdkServer.StreamableHTTPHandler())
 
@@ -591,4 +600,88 @@ func splitCSV(v string) (out []string) {
 func isCSVSeparator(r rune) (isSep bool) {
 	isSep = r == ',' || unicode.IsSpace(r)
 	return isSep
+}
+
+// loadSkillLibrary reads the operator's investigation playbooks.
+//
+// A missing or unreadable directory is not fatal: the tools, the MCP transport
+// and the metrics endpoint all work without playbooks, and refusing to start
+// over absent optional content would be the same mistake as exiting when Slack
+// is down.
+func loadSkillLibrary(ctx context.Context, dir string, logger *slog.Logger) (library *investigations.SkillLibrary) {
+	var err error
+
+	library, err = investigations.NewSkillLibrary(dir)
+	if err != nil {
+		logger.WarnContext(ctx, "no investigation playbooks loaded; MCP clients will receive no operator knowledge",
+			slog.String("dir", dir),
+			slog.String("error", err.Error()))
+
+		library = nil
+
+		return library
+	}
+
+	logger.InfoContext(ctx, "loaded investigation playbooks",
+		slog.String("dir", dir),
+		slog.Int("count", len(library.ListSkills())))
+
+	return library
+}
+
+// attachSkillLibrary loads the investigation playbooks and attaches them to the
+// tool server, returning the same library for the Slack front-end to share.
+func attachSkillLibrary(ctx context.Context, toolServer *mcp.Server, dir string, logger *slog.Logger) (library *investigations.SkillLibrary) {
+	library = loadSkillLibrary(ctx, dir, logger)
+	toolServer.SetSkillLibrary(library)
+
+	return library
+}
+
+// parseDurationEnv reads a duration environment variable, returning zero when
+// unset or unparseable so the caller's default applies. An unparseable value is
+// logged rather than swallowed: a typo that silently reverts to a default is
+// how a deployment ends up not doing what its manifest says.
+func parseDurationEnv(name string, logger *slog.Logger) (result time.Duration) {
+	raw := os.Getenv(name)
+	if raw == "" {
+		return result
+	}
+
+	parsed, err := time.ParseDuration(raw)
+	if err != nil {
+		logger.Warn("ignoring unparseable duration; using the default",
+			slog.String("variable", name),
+			slog.String("value", raw),
+			slog.String("error", err.Error()))
+
+		return result
+	}
+
+	result = parsed
+
+	return result
+}
+
+// loadConfig assembles the bot configuration from the environment.
+func loadConfig(logger *slog.Logger) (cfg bot.Config) {
+	cfg = bot.Config{
+		SlackBotToken:    getEnv("SLACK_BOT_TOKEN", ""),
+		SlackAppToken:    getEnv("SLACK_APP_TOKEN", ""),
+		AnthropicAPIKey:  getEnv("ANTHROPIC_API_KEY", ""),
+		InvestigationDir: getEnv("INVESTIGATION_DIR", "./investigations"),
+		FileRetention:    parseFileRetention(logger),
+		GitHubToken:      getEnv("GITHUB_TOKEN", ""),
+		ClaudeModel:      getEnv("CLAUDE_MODEL", "claude-sonnet-4-5-20250929"),
+		PDFDisabled:      isTruthy(getEnv("PDF_DISABLED", "")),
+
+		// Preloaded operator knowledge, shared with the MCP transport.
+		ContextDocuments: splitCSV(os.Getenv("CONTEXT_DOCUMENTS")),
+
+		// Bounds on the Slack reconnection backoff. Zero keeps the defaults.
+		SlackRetryInitial: parseDurationEnv("SLACK_RETRY_INITIAL", logger),
+		SlackRetryMax:     parseDurationEnv("SLACK_RETRY_MAX", logger),
+	}
+
+	return cfg
 }

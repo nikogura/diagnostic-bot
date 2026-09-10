@@ -21,10 +21,33 @@ type SDKServer struct {
 // NewSDKServer creates a new MCP SDK-based server from an existing Server.
 // It registers all tools from the legacy server with the SDK's tool system.
 func NewSDKServer(legacy *Server) (result *SDKServer) {
+	result = NewSDKServerWithContext(legacy, nil)
+	return result
+}
+
+// NewSDKServerWithContext builds the MCP server, inlining the named context
+// documents into the instructions clients receive at connect.
+//
+// Instructions are delivered once during initialize and folded into the
+// client's context, so a locally started agent arrives already knowing how this
+// environment is arranged — which accounts hold which clusters, what the humans
+// here call each one — instead of rediscovering it every session. Which
+// documents load is a deployment decision rather than a property of the file,
+// so one library can orient differently per installation.
+func NewSDKServerWithContext(legacy *Server, documents []string) (result *SDKServer) {
+	instructions := BuildInstructions(InstructionsInput{
+		Library:          legacy.SkillLibrary(),
+		ContextDocuments: documents,
+	})
+
+	logInstructions(legacy.logger, instructions, documents)
+
 	mcpServer := sdkmcp.NewServer(&sdkmcp.Implementation{
 		Name:    "nikogura.com/diagnostic-bot",
 		Version: "0.2.0",
-	}, nil)
+	}, &sdkmcp.ServerOptions{
+		Instructions: instructions.Text,
+	})
 
 	result = &SDKServer{
 		mcpServer: mcpServer,
@@ -432,5 +455,30 @@ func (s *SDKServer) registerAPITools() {
 			}
 			return result, err
 		})
+	}
+}
+
+// logInstructions reports what the assembled instructions contain, and says so
+// out loud when a configured document was misnamed or did not fit. Both are
+// silent failures otherwise: the agent simply never learns something the
+// operator believed they had published.
+func logInstructions(logger *slog.Logger, result InstructionsResult, documents []string) {
+	if logger == nil {
+		return
+	}
+
+	logger.Info("assembled MCP server instructions",
+		slog.Int("bytes", len(result.Text)),
+		slog.Int("documents", len(documents)-len(result.Missing)-len(result.Skipped)))
+
+	if len(result.Missing) > 0 {
+		logger.Error("configured context document does not exist; it will not reach MCP clients",
+			slog.Any("missing", result.Missing))
+	}
+
+	if len(result.Skipped) > 0 {
+		logger.Error("context documents exceeded the instruction budget and were omitted",
+			slog.Any("skipped", result.Skipped),
+			slog.Int("max_bytes", MaxInstructionsBytes))
 	}
 }
