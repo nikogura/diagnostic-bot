@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
+	"sort"
 
 	sdkmcp "github.com/modelcontextprotocol/go-sdk/mcp"
 )
@@ -14,8 +15,14 @@ import (
 // It provides the Streamable HTTP transport.
 type SDKServer struct {
 	mcpServer *sdkmcp.Server
-	legacy    *Server
-	logger    *slog.Logger
+
+	// registered records every tool name actually wired into the SDK server.
+	// The legacy catalog decides what is advertised and authorized; this
+	// records what the Streamable-HTTP endpoint can dispatch. The two must
+	// agree, and recording the second is what lets a test prove it.
+	registered []string
+	legacy     *Server
+	logger     *slog.Logger
 }
 
 // NewSDKServer creates a new MCP SDK-based server from an existing Server.
@@ -122,6 +129,8 @@ func (s *SDKServer) getServer(_ *http.Request) (server *sdkmcp.Server) {
 // registerTool registers a single legacy tool with the SDK server.
 // It wraps the existing execute* handler to match the SDK's ToolHandler signature.
 func (s *SDKServer) registerTool(name, description string, schema map[string]interface{}, handler func(context.Context, map[string]interface{}) (string, error)) {
+	s.registered = append(s.registered, name)
+
 	tool := &sdkmcp.Tool{
 		Name:        name,
 		Description: description,
@@ -182,6 +191,7 @@ func (s *SDKServer) registerTools() {
 	s.registerTempoTools()
 	s.registerAWSTools()
 	s.registerAPITools()
+	s.registerInvestigationTools()
 
 	s.logger.Info("SDK server tools registered")
 }
@@ -481,4 +491,40 @@ func logInstructions(logger *slog.Logger, result InstructionsResult, documents [
 			slog.Any("skipped", result.Skipped),
 			slog.Int("max_bytes", MaxInstructionsBytes))
 	}
+}
+
+// registerInvestigationTools exposes the investigation catalog over the
+// Streamable-HTTP transport.
+//
+// Every tool family has to be registered here as well as declared in the legacy
+// catalog: the legacy catalog is what authorization and list_my_tools reason
+// about, but this registration is what the /mcp endpoint can actually dispatch.
+// A family present in one and absent from the other fails silently — the tool
+// is reported as usable and then cannot be called.
+func (s *SDKServer) registerInvestigationTools() {
+	handlers := map[string]func(context.Context, map[string]interface{}) (string, error){
+		toolGetInvestigation:   s.legacy.executeGetInvestigation,
+		toolMatchInvestigation: s.legacy.executeMatchInvestigation,
+		toolListInvestigations: s.legacy.executeListInvestigations,
+	}
+
+	for _, t := range getInvestigationTools(s.legacy.SkillLibrary()) {
+		h, ok := handlers[t.Name]
+		if !ok {
+			continue
+		}
+
+		s.registerTool(t.Name, t.Description, t.InputSchema, h)
+	}
+}
+
+// RegisteredTools returns the tool names the Streamable-HTTP transport can
+// dispatch, sorted.
+func (s *SDKServer) RegisteredTools() (names []string) {
+	names = make([]string, len(s.registered))
+	copy(names, s.registered)
+
+	sort.Strings(names)
+
+	return names
 }
