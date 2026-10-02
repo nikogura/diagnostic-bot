@@ -40,6 +40,16 @@ mcpHttp:
 # accept commas AND newlines, so a YAML block scalar stays readable.
 config:
   LOKI_ENDPOINT: ""
+  # Tenancy for Loki and Tempo (X-Scope-OrgID). Leave all four empty when the
+  # backend runs without multi-tenancy: no header is sent and the backend uses
+  # its built-in tenant ("fake" in Loki). Otherwise *_DEFAULT_ORG_ID is the
+  # tenant used when a request names none, and *_ORG_IDS is the allowlist of
+  # tenants a request may name — commas or one per line. See the README,
+  # "Multi-Tenant Backends".
+  LOKI_DEFAULT_ORG_ID: ""
+  LOKI_ORG_IDS: ""
+  TEMPO_DEFAULT_ORG_ID: ""
+  TEMPO_ORG_IDS: ""
   # Reference documents carrying environment knowledge, delivered to
   # BOTH front-ends: inlined into MCP client context at connect, and prepended
   # to every Slack investigation prompt. Names are file stems from

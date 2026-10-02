@@ -3,7 +3,6 @@ package k8s
 import (
 	"context"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -15,6 +14,7 @@ import (
 	"time"
 
 	"github.com/nikogura/diagnostic-bot/pkg/metrics"
+	"github.com/nikogura/diagnostic-bot/pkg/tenant"
 )
 
 const (
@@ -28,15 +28,28 @@ const (
 	// when auth_enabled: true. The value is Go's canonicalized form of
 	// "X-Scope-OrgID" — Loki treats it case-insensitively per HTTP spec.
 	LokiTenantHeader = "X-Scope-Orgid"
+
+	// DefaultLokiLabelWindow is how far back label discovery looks when the
+	// caller gives no start.
+	DefaultLokiLabelWindow = "1h"
+
+	lokiBackend       = "loki"
+	lokiStatusSuccess = "success"
+	lokiStatusError   = "error"
+	lokiResultMatrix  = "matrix"
+
+	// lokiDefaultSteps is how many samples per series a metric query returns
+	// when the caller gives no step. Loki's own default is far finer, which
+	// buries the answer to "which streams exist" under hundreds of samples each.
+	lokiDefaultSteps = 20
 )
 
 // LokiClient handles queries to the Loki log aggregation system.
 type LokiClient struct {
-	endpoint       string
-	httpClient     *http.Client
-	logger         *slog.Logger
-	defaultTenant  string
-	allowedTenants map[string]struct{}
+	endpoint   string
+	httpClient *http.Client
+	logger     *slog.Logger
+	tenants    tenant.Policy
 }
 
 // NewLokiClient creates a new Loki client. Multi-tenant Loki deployments
@@ -55,8 +68,7 @@ func NewLokiClient(endpoint string, logger *slog.Logger) (result *LokiClient) {
 			// http.DefaultTransport (see pkg/mcp/tempo.go for context).
 			Transport: &http.Transport{},
 		},
-		logger:         logger,
-		allowedTenants: map[string]struct{}{},
+		logger: logger,
 	}
 
 	return result
@@ -73,73 +85,44 @@ func NewLokiClient(endpoint string, logger *slog.Logger) (result *LokiClient) {
 // from hallucinating tenant names. When the allowlist is non-empty, the
 // default tenant must be on it.
 func (l *LokiClient) ConfigureTenants(defaultTenant string, allowedTenants []string) (err error) {
-	allowSet := make(map[string]struct{}, len(allowedTenants))
-	for _, t := range allowedTenants {
-		t = strings.TrimSpace(t)
-		if t == "" {
-			continue
-		}
-		allowSet[t] = struct{}{}
+	var policy tenant.Policy
+
+	policy, err = tenant.NewPolicy(lokiBackend, defaultTenant, allowedTenants)
+	if err != nil {
+		return err
 	}
 
-	if defaultTenant != "" && len(allowSet) > 0 {
-		_, ok := allowSet[defaultTenant]
-		if !ok {
-			err = fmt.Errorf("default tenant %q is not in the allowlist %v", defaultTenant, allowedTenants)
-			return err
-		}
-	}
+	l.tenants = policy
 
-	l.defaultTenant = defaultTenant
-	l.allowedTenants = allowSet
 	return err
 }
 
 // AllowedTenants returns the configured tenant allowlist in sorted order.
-// The MCP layer injects this list into the loki_query tool description so
-// the calling LLM can discover which tenants are queryable.
+// The MCP layer injects this list into the Loki tool descriptions so the
+// calling LLM can discover which tenants are queryable.
 func (l *LokiClient) AllowedTenants() (result []string) {
-	result = make([]string, 0, len(l.allowedTenants))
-	for t := range l.allowedTenants {
-		result = append(result, t)
-	}
-	sort.Strings(result)
+	result = l.tenants.Allowed()
 	return result
 }
 
-// resolveTenant returns the X-Scope-OrgID value to send for a given
-// QueryRequest, after applying the default and validating against the
-// allowlist. Empty return with nil err means no header should be sent
-// (the auth_enabled:false backwards-compatible path).
-func (l *LokiClient) resolveTenant(req QueryRequest) (tenant string, err error) {
-	tenant = strings.TrimSpace(req.Tenant)
-	if tenant == "" {
-		tenant = l.defaultTenant
+// DiscoveryTenants returns the tenants a label lookup should inspect one at a
+// time: the ones requested, or every allowed tenant when none is named.
+func (l *LokiClient) DiscoveryTenants(requested string) (tenants []string, err error) {
+	tenants, err = l.tenants.Each(requested)
+	return tenants, err
+}
+
+// UnsearchedTenants returns the allowed tenants a lookup for requested did not
+// cover, so an empty result can say where else to look.
+func (l *LokiClient) UnsearchedTenants(requested string) (remaining []string) {
+	searched, err := l.tenants.Resolve(requested)
+	if err != nil {
+		return remaining
 	}
 
-	if tenant == "" {
-		if len(l.allowedTenants) > 0 {
-			err = errors.New("loki tenant allowlist is configured but no tenant was specified — set a default via LOKI_DEFAULT_ORG_ID or pass tenant explicitly")
-			return tenant, err
-		}
-		return tenant, err
-	}
+	remaining = l.tenants.Unsearched(searched)
 
-	if len(l.allowedTenants) == 0 {
-		return tenant, err
-	}
-
-	// Loki accepts pipe-delimited tenants on read paths (query_range, labels,
-	// series). Validate every segment against the allowlist.
-	for _, segment := range strings.Split(tenant, "|") {
-		segment = strings.TrimSpace(segment)
-		_, ok := l.allowedTenants[segment]
-		if !ok {
-			err = fmt.Errorf("tenant %q is not in the loki allowlist", segment)
-			return tenant, err
-		}
-	}
-	return tenant, err
+	return remaining
 }
 
 // QueryRequest represents a query request to Loki.
@@ -148,12 +131,23 @@ type QueryRequest struct {
 	Start  string // RFC3339 format or relative duration (e.g., "1h", "24h")
 	End    string // RFC3339 format or "now"
 	Limit  int
+	Step   string // Metric-query resolution as a duration (e.g., "5m"). Empty picks one from the range.
 	Tenant string // X-Scope-OrgID value. Empty means use the client's default.
 }
 
-// QueryResult represents the result from a Loki query.
+// LabelRequest scopes a label-discovery request to Loki.
+type LabelRequest struct {
+	Start  string // RFC3339 format or relative duration. Empty means DefaultLokiLabelWindow.
+	End    string // RFC3339 format or "now"
+	Query  string // Optional stream selector limiting which streams are considered.
+	Tenant string // X-Scope-OrgID value. Empty means use the client's default.
+}
+
+// QueryResult represents the result from a Loki query. A log query fills
+// Entries; a metric query fills Series.
 type QueryResult struct {
 	Entries   []LogEntry
+	Series    []MetricSeries
 	Stats     QueryStats
 	RawResult string
 }
@@ -165,6 +159,19 @@ type LogEntry struct {
 	Labels    map[string]string
 }
 
+// MetricSeries is one series returned by a metric query, with the labels that
+// identify it.
+type MetricSeries struct {
+	Labels  map[string]string
+	Samples []MetricSample
+}
+
+// MetricSample is one point of a MetricSeries.
+type MetricSample struct {
+	Timestamp time.Time
+	Value     string
+}
+
 // QueryStats provides statistics about the query execution.
 type QueryStats struct {
 	TotalEntries int
@@ -173,31 +180,22 @@ type QueryStats struct {
 }
 
 // Query executes a LogQL query against Loki.
-//
-//nolint:gocognit,funlen // Loki query execution with parsing and error handling is inherently complex
 func (l *LokiClient) Query(ctx context.Context, req QueryRequest) (result QueryResult, err error) {
 	var startTime time.Time
 	var endTime time.Time
-	var httpReq *http.Request
-	var resp *http.Response
-	var body []byte
 
 	start := time.Now()
 
-	// Parse start and end times
-	startTime, err = parseTimeOrDuration(req.Start)
+	startTime, endTime, err = parseTimeRange(req.Start, req.End)
 	if err != nil {
-		err = fmt.Errorf("parsing start time: %w", err)
 		return result, err
 	}
 
-	endTime = time.Now()
-	if req.End != "" && req.End != "now" {
-		endTime, err = parseTimeOrDuration(req.End)
-		if err != nil {
-			err = fmt.Errorf("parsing end time: %w", err)
-			return result, err
-		}
+	var step time.Duration
+
+	step, err = resolveStep(req.Step, startTime, endTime)
+	if err != nil {
+		return result, err
 	}
 
 	// Set default and max limit
@@ -209,65 +207,36 @@ func (l *LokiClient) Query(ctx context.Context, req QueryRequest) (result QueryR
 		req.Limit = MaxLokiResults
 	}
 
+	// Resolve and validate the Loki tenant (X-Scope-OrgID) before issuing
+	// the request. Multi-tenant deployments (auth_enabled: true) refuse
+	// queries without a tenant header — the allowlist check runs first so
+	// invalid tenants never hit the wire.
+	var tenantID string
+
+	tenantID, err = l.tenants.Resolve(req.Tenant)
+	if err != nil {
+		return result, err
+	}
+
 	l.logger.InfoContext(ctx, "executing Loki query",
 		slog.String("query", req.Query),
+		slog.String("tenant", tenantID),
 		slog.Time("start", startTime),
 		slog.Time("end", endTime),
 		slog.Int("limit", req.Limit))
 
-	// Build query URL
-	queryURL := fmt.Sprintf("%s/loki/api/v1/query_range", l.endpoint)
-
+	// step only shapes metric queries; Loki ignores it for log queries.
 	params := url.Values{}
 	params.Set("query", req.Query)
 	params.Set("start", strconv.FormatInt(startTime.UnixNano(), 10))
 	params.Set("end", strconv.FormatInt(endTime.UnixNano(), 10))
 	params.Set("limit", strconv.Itoa(req.Limit))
+	params.Set("step", strconv.FormatFloat(step.Seconds(), 'f', -1, 64))
 
-	fullURL := fmt.Sprintf("%s?%s", queryURL, params.Encode())
+	var body []byte
 
-	// Resolve and validate the Loki tenant (X-Scope-OrgID) before issuing
-	// the request. Multi-tenant deployments (auth_enabled: true) refuse
-	// queries without a tenant header — the allowlist check runs first so
-	// invalid tenants never hit the wire.
-	var tenant string
-	tenant, err = l.resolveTenant(req)
+	body, err = l.get(ctx, "/loki/api/v1/query_range", params, tenantID)
 	if err != nil {
-		return result, err
-	}
-
-	// Execute HTTP request
-	httpReq, err = http.NewRequestWithContext(ctx, http.MethodGet, fullURL, nil)
-	if err != nil {
-		err = fmt.Errorf("creating HTTP request: %w", err)
-		return result, err
-	}
-
-	if tenant != "" {
-		httpReq.Header.Set(LokiTenantHeader, tenant)
-	}
-
-	resp, err = l.httpClient.Do(httpReq)
-	if err != nil {
-		err = fmt.Errorf("executing HTTP request: %w", err)
-		return result, err
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		var statusBody []byte
-
-		statusBody, _ = io.ReadAll(resp.Body)
-		metrics.RecordLokiQuery(ctx, "error")
-		err = fmt.Errorf("loki query failed with status %d: %s", resp.StatusCode, string(statusBody))
-
-		return result, err
-	}
-
-	// Parse response
-	body, err = io.ReadAll(resp.Body)
-	if err != nil {
-		err = fmt.Errorf("reading response body: %w", err)
 		return result, err
 	}
 
@@ -279,36 +248,183 @@ func (l *LokiClient) Query(ctx context.Context, req QueryRequest) (result QueryR
 		return result, err
 	}
 
-	if lokiResp.Status != "success" {
+	if lokiResp.Status != lokiStatusSuccess {
 		err = fmt.Errorf("loki query unsuccessful: %s", lokiResp.Status)
 		return result, err
 	}
 
-	// Extract log entries
-	var entries []LogEntry
+	// A metric query (count_over_time, rate, sum by …) answers with series
+	// rather than log lines. Reading it as log lines yields nothing, which
+	// reports data that exists as absent.
+	if lokiResp.Data.ResultType == lokiResultMatrix {
+		result.Series = parseSeries(lokiResp.Data.Result)
+	} else {
+		result.Entries = parseLogEntries(lokiResp.Data.Result)
+	}
 
-	for _, stream := range lokiResp.Data.Result {
-		labels := stream.Stream
+	duration := time.Since(start)
 
+	l.logger.InfoContext(ctx, "Loki query completed",
+		slog.Int("entries", len(result.Entries)),
+		slog.Int("series", len(result.Series)),
+		slog.Duration("duration", duration))
+
+	result.Stats = QueryStats{TotalEntries: len(result.Entries), Duration: duration}
+	result.RawResult = string(body)
+
+	return result, err
+}
+
+// LabelNames returns the label names present on one tenant's streams within
+// the requested window, sorted.
+func (l *LokiClient) LabelNames(ctx context.Context, req LabelRequest) (names []string, err error) {
+	names, err = l.labels(ctx, "/loki/api/v1/labels", req)
+	return names, err
+}
+
+// LabelValues returns the values one tenant's streams carry for label within
+// the requested window, sorted.
+func (l *LokiClient) LabelValues(ctx context.Context, label string, req LabelRequest) (values []string, err error) {
+	if !validLabelName(label) {
+		err = fmt.Errorf("invalid label name %q: expected letters, digits and underscores, not starting with a digit", label)
+		return values, err
+	}
+
+	values, err = l.labels(ctx, "/loki/api/v1/label/"+label+"/values", req)
+
+	return values, err
+}
+
+// labels issues one label-discovery request and returns its sorted answer.
+func (l *LokiClient) labels(ctx context.Context, path string, req LabelRequest) (found []string, err error) {
+	var startTime time.Time
+	var endTime time.Time
+
+	startStr := req.Start
+	if startStr == "" {
+		startStr = DefaultLokiLabelWindow
+	}
+
+	startTime, endTime, err = parseTimeRange(startStr, req.End)
+	if err != nil {
+		return found, err
+	}
+
+	var tenantID string
+
+	tenantID, err = l.tenants.Resolve(req.Tenant)
+	if err != nil {
+		return found, err
+	}
+
+	params := url.Values{}
+	params.Set("start", strconv.FormatInt(startTime.UnixNano(), 10))
+	params.Set("end", strconv.FormatInt(endTime.UnixNano(), 10))
+
+	if req.Query != "" {
+		params.Set("query", req.Query)
+	}
+
+	l.logger.InfoContext(ctx, "executing Loki label lookup",
+		slog.String("path", path),
+		slog.String("tenant", tenantID),
+		slog.String("query", req.Query))
+
+	var body []byte
+
+	body, err = l.get(ctx, path, params, tenantID)
+	if err != nil {
+		return found, err
+	}
+
+	var labelResp lokiLabelResponse
+
+	err = json.Unmarshal(body, &labelResp)
+	if err != nil {
+		err = fmt.Errorf("parsing Loki response: %w", err)
+		return found, err
+	}
+
+	if labelResp.Status != lokiStatusSuccess {
+		err = fmt.Errorf("loki label lookup unsuccessful: %s", labelResp.Status)
+		return found, err
+	}
+
+	found = labelResp.Data
+	sort.Strings(found)
+
+	return found, err
+}
+
+// get issues a GET against a Loki API path as tenantID and returns the body.
+// An empty tenantID sends no X-Scope-OrgID header.
+func (l *LokiClient) get(ctx context.Context, path string, params url.Values, tenantID string) (body []byte, err error) {
+	var httpReq *http.Request
+	var resp *http.Response
+
+	fullURL := fmt.Sprintf("%s%s?%s", l.endpoint, path, params.Encode())
+
+	httpReq, err = http.NewRequestWithContext(ctx, http.MethodGet, fullURL, nil)
+	if err != nil {
+		err = fmt.Errorf("creating HTTP request: %w", err)
+		return body, err
+	}
+
+	if tenantID != "" {
+		httpReq.Header.Set(LokiTenantHeader, tenantID)
+	}
+
+	resp, err = l.httpClient.Do(httpReq)
+	if err != nil {
+		metrics.RecordLokiQuery(ctx, lokiStatusError)
+		err = fmt.Errorf("executing HTTP request: %w", err)
+
+		return body, err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		var statusBody []byte
+
+		statusBody, _ = io.ReadAll(resp.Body)
+		metrics.RecordLokiQuery(ctx, lokiStatusError)
+		err = fmt.Errorf("loki query failed with status %d: %s", resp.StatusCode, string(statusBody))
+
+		return body, err
+	}
+
+	body, err = io.ReadAll(resp.Body)
+	if err != nil {
+		metrics.RecordLokiQuery(ctx, lokiStatusError)
+		err = fmt.Errorf("reading response body: %w", err)
+
+		return body, err
+	}
+
+	metrics.RecordLokiQuery(ctx, lokiStatusSuccess)
+
+	return body, err
+}
+
+// parseLogEntries extracts the log lines from a streams result.
+func parseLogEntries(results []lokiResult) (entries []LogEntry) {
+	for _, stream := range results {
 		for _, value := range stream.Values {
 			if len(value) < 2 {
 				continue
 			}
 
-			// Parse timestamp (nanoseconds)
+			// Timestamp is a string of nanoseconds.
 			timestampStr, ok := value[0].(string)
 			if !ok {
 				continue
 			}
 
-			var timestamp int64
-			_, scanErr := fmt.Sscanf(timestampStr, "%d", &timestamp)
-
-			if scanErr != nil {
+			timestamp, parseErr := strconv.ParseInt(timestampStr, 10, 64)
+			if parseErr != nil {
 				continue
 			}
 
-			// Parse log line
 			line, ok := value[1].(string)
 			if !ok {
 				continue
@@ -317,34 +433,60 @@ func (l *LokiClient) Query(ctx context.Context, req QueryRequest) (result QueryR
 			entries = append(entries, LogEntry{
 				Timestamp: time.Unix(0, timestamp),
 				Line:      line,
-				Labels:    labels,
+				Labels:    stream.Stream,
 			})
 		}
 	}
 
-	duration := time.Since(start)
+	return entries
+}
 
-	// Record successful query
-	metrics.RecordLokiQuery(ctx, "success")
+// parseSeries extracts the series from a matrix result.
+func parseSeries(results []lokiResult) (series []MetricSeries) {
+	for _, metric := range results {
+		samples := make([]MetricSample, 0, len(metric.Values))
 
-	l.logger.InfoContext(ctx, "Loki query completed",
-		slog.Int("entries", len(entries)),
-		slog.Duration("duration", duration))
+		for _, value := range metric.Values {
+			if len(value) < 2 {
+				continue
+			}
 
-	result = QueryResult{
-		Entries: entries,
-		Stats: QueryStats{
-			TotalEntries: len(entries),
-			Duration:     duration,
-		},
-		RawResult: string(body),
+			// Timestamp is a number of seconds, possibly fractional.
+			seconds, ok := value[0].(float64)
+			if !ok {
+				continue
+			}
+
+			sample, ok := value[1].(string)
+			if !ok {
+				continue
+			}
+
+			samples = append(samples, MetricSample{
+				Timestamp: time.Unix(0, int64(seconds*float64(time.Second))),
+				Value:     sample,
+			})
+		}
+
+		series = append(series, MetricSeries{Labels: metric.Metric, Samples: samples})
 	}
 
-	return result, err
+	return series
+}
+
+// Empty reports whether the query matched nothing.
+func (q *QueryResult) Empty() (empty bool) {
+	empty = len(q.Entries) == 0 && len(q.Series) == 0
+	return empty
 }
 
 // FormatResultAsText formats the query result as human-readable text.
 func (q *QueryResult) FormatResultAsText() (result string) {
+	if len(q.Series) > 0 {
+		result = q.formatSeries()
+		return result
+	}
+
 	if len(q.Entries) == 0 {
 		result = "No log entries found."
 		return result
@@ -365,16 +507,139 @@ func (q *QueryResult) FormatResultAsText() (result string) {
 	return result
 }
 
+// formatSeries renders a metric query's series, each under the labels that
+// identify it.
+func (q *QueryResult) formatSeries() (result string) {
+	var builder strings.Builder
+
+	fmt.Fprintf(&builder, "Found %d series:\n\n", len(q.Series))
+
+	for _, series := range q.Series {
+		fmt.Fprintf(&builder, "%s\n", FormatLabels(series.Labels))
+
+		for _, sample := range series.Samples {
+			fmt.Fprintf(&builder, "  %s  %s\n", sample.Timestamp.UTC().Format(time.RFC3339), sample.Value)
+		}
+
+		builder.WriteString("\n")
+	}
+
+	fmt.Fprintf(&builder, "Query completed in %s\n", q.Stats.Duration)
+
+	result = builder.String()
+
+	return result
+}
+
+// FormatLabels renders a label set as a LogQL selector, keys sorted.
+func FormatLabels(labels map[string]string) (rendered string) {
+	keys := make([]string, 0, len(labels))
+	for key := range labels {
+		keys = append(keys, key)
+	}
+
+	sort.Strings(keys)
+
+	pairs := make([]string, 0, len(keys))
+	for _, key := range keys {
+		pairs = append(pairs, fmt.Sprintf("%s=%q", key, labels[key]))
+	}
+
+	rendered = "{" + strings.Join(pairs, ", ") + "}"
+
+	return rendered
+}
+
 // lokiQueryRangeResponse represents the JSON response from Loki query_range endpoint.
 type lokiQueryRangeResponse struct {
 	Status string `json:"status"`
 	Data   struct {
-		ResultType string `json:"resultType"`
-		Result     []struct {
-			Stream map[string]string `json:"stream"`
-			Values [][]interface{}   `json:"values"`
-		} `json:"result"`
+		ResultType string       `json:"resultType"`
+		Result     []lokiResult `json:"result"`
 	} `json:"data"`
+}
+
+// lokiResult is one element of a query_range result: a log stream (Stream,
+// with [nanosecond-string, line] values) or a metric series (Metric, with
+// [seconds, value-string] values).
+type lokiResult struct {
+	Stream map[string]string `json:"stream"`
+	Metric map[string]string `json:"metric"`
+	Values [][]interface{}   `json:"values"`
+}
+
+// lokiLabelResponse represents the JSON response from Loki's label endpoints.
+type lokiLabelResponse struct {
+	Status string   `json:"status"`
+	Data   []string `json:"data"`
+}
+
+// validLabelName reports whether name is a legal Loki label name. The name is
+// placed in a URL path, so anything else is refused before a request is built.
+func validLabelName(name string) (valid bool) {
+	if name == "" {
+		return valid
+	}
+
+	for i, r := range name {
+		isLetter := (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || r == '_'
+		isDigit := r >= '0' && r <= '9'
+
+		if !isLetter && (!isDigit || i == 0) {
+			return valid
+		}
+	}
+
+	valid = true
+
+	return valid
+}
+
+// parseTimeRange parses a query window. An empty or "now" end is the present.
+func parseTimeRange(startStr, endStr string) (startTime time.Time, endTime time.Time, err error) {
+	startTime, err = parseTimeOrDuration(startStr)
+	if err != nil {
+		err = fmt.Errorf("parsing start time: %w", err)
+		return startTime, endTime, err
+	}
+
+	endTime = time.Now()
+
+	if endStr != "" && endStr != "now" {
+		endTime, err = parseTimeOrDuration(endStr)
+		if err != nil {
+			err = fmt.Errorf("parsing end time: %w", err)
+			return startTime, endTime, err
+		}
+	}
+
+	return startTime, endTime, err
+}
+
+// resolveStep returns the metric-query resolution: the caller's, or one that
+// yields lokiDefaultSteps samples across the window.
+func resolveStep(stepStr string, startTime, endTime time.Time) (step time.Duration, err error) {
+	if stepStr != "" {
+		step, err = time.ParseDuration(stepStr)
+		if err != nil {
+			err = fmt.Errorf("parsing step (expected a duration such as 30s, 5m, 1h): %w", err)
+			return step, err
+		}
+
+		if step <= 0 {
+			err = fmt.Errorf("step must be positive, got %s", stepStr)
+			return step, err
+		}
+
+		return step, err
+	}
+
+	step = (endTime.Sub(startTime) / lokiDefaultSteps).Truncate(time.Second)
+	if step < time.Second {
+		step = time.Second
+	}
+
+	return step, err
 }
 
 // parseTimeOrDuration parses a time string that can be either RFC3339 format

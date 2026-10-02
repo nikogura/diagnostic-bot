@@ -23,6 +23,7 @@ import (
 	"github.com/nikogura/diagnostic-bot/pkg/mcp/auth"
 	"github.com/nikogura/diagnostic-bot/pkg/metrics"
 	"github.com/nikogura/diagnostic-bot/pkg/observability"
+	"github.com/nikogura/diagnostic-bot/pkg/tenant"
 )
 
 // serviceName identifies this service in telemetry; otelScope is the
@@ -206,24 +207,23 @@ func getEnv(key string, defaultValue string) (result string) {
 	return result
 }
 
+// lokiTenantsFromEnv reads the Loki tenant configuration: the default tenant
+// from LOKI_DEFAULT_ORG_ID and the allowlist from LOKI_ORG_IDS, which accepts
+// commas and newlines.
+func lokiTenantsFromEnv() (defaultTenant string, allowedTenants []string) {
+	defaultTenant = strings.TrimSpace(getEnv("LOKI_DEFAULT_ORG_ID", ""))
+	allowedTenants = tenant.ParseIDs(getEnv("LOKI_ORG_IDS", ""))
+
+	return defaultTenant, allowedTenants
+}
+
 // configureLokiTenants reads LOKI_DEFAULT_ORG_ID and LOKI_ORG_IDS and applies
 // them to the supplied client. Both empty preserves the auth_enabled:false
 // behavior (no X-Scope-OrgID sent). Misconfiguration is fatal — silently
 // running with a half-applied tenant config would be worse than failing
 // at startup.
 func configureLokiTenants(ctx context.Context, client *k8s.LokiClient, logger *slog.Logger) {
-	defaultTenant := getEnv("LOKI_DEFAULT_ORG_ID", "")
-	orgIDsCSV := getEnv("LOKI_ORG_IDS", "")
-
-	var allowedTenants []string
-	if orgIDsCSV != "" {
-		for _, t := range strings.Split(orgIDsCSV, ",") {
-			t = strings.TrimSpace(t)
-			if t != "" {
-				allowedTenants = append(allowedTenants, t)
-			}
-		}
-	}
+	defaultTenant, allowedTenants := lokiTenantsFromEnv()
 
 	if defaultTenant == "" && len(allowedTenants) == 0 {
 		return
@@ -274,19 +274,29 @@ func parseFileRetention(logger *slog.Logger) (result time.Duration) {
 	return result
 }
 
+// lokiClientFromEnv builds the Loki client from LOKI_ENDPOINT. It returns nil
+// when the endpoint is unset, which is what withholds the Loki tools: a client
+// pointed at a fallback address would advertise tools that cannot answer, and
+// count as a log source that does not exist.
+func lokiClientFromEnv(ctx context.Context, logger *slog.Logger) (client *k8s.LokiClient) {
+	lokiEndpoint := getEnv("LOKI_ENDPOINT", "")
+	if lokiEndpoint == "" {
+		logger.WarnContext(ctx, "LOKI_ENDPOINT not set - Loki tools will be unavailable")
+		return client
+	}
+
+	client = k8s.NewLokiClient(lokiEndpoint, logger)
+	configureLokiTenants(ctx, client, logger)
+
+	return client
+}
+
 // buildToolServer constructs the single in-process MCP tool surface from
 // environment configuration. Loki is best-effort (a missing endpoint warns
 // rather than fails) so the bot still serves the rest of its toolset; the
 // server self-gates each tool group by which backend is configured.
 func buildToolServer(ctx context.Context, githubToken string, logger *slog.Logger) (server *mcp.Server) {
-	lokiEndpoint := getEnv("LOKI_ENDPOINT", "")
-	if lokiEndpoint == "" {
-		logger.WarnContext(ctx, "LOKI_ENDPOINT not set - MCP Loki tools will be unavailable")
-		lokiEndpoint = "http://localhost:3100" // Fallback
-	}
-
-	lokiClient := k8s.NewLokiClient(lokiEndpoint, logger)
-	configureLokiTenants(ctx, lokiClient, logger)
+	lokiClient := lokiClientFromEnv(ctx, logger)
 
 	// Operator-supplied third-party API tools (API_CONFIG_DIR). Absent config
 	// degrades to an empty registry, so this is a no-op unless configured.

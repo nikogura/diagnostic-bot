@@ -21,7 +21,7 @@ All tools are read-only except the Grafana dashboard-management tools. Each grou
 
 | Group | Tools | Enabled by |
 |-------|-------|------------|
-| Logs (Loki) | `loki_query` | `LOKI_ENDPOINT` |
+| Logs (Loki) | `loki_query`, `loki_label_names`, `loki_label_values` | `LOKI_ENDPOINT` |
 | Logs (CloudWatch) | `cloudwatch_logs_query`, `cloudwatch_logs_list_groups`, `cloudwatch_logs_get_events` | `CLOUDWATCH_ACCOUNTS` or `CLOUDWATCH_ASSUME_ROLE` |
 | Metrics (CloudWatch) | `cloudwatch_metrics_list`, `cloudwatch_metrics_get_statistics`, `cloudwatch_metrics_query` | `CLOUDWATCH_ACCOUNTS` or `CLOUDWATCH_ASSUME_ROLE` |
 | Alarms (CloudWatch) | `cloudwatch_alarms_list`, `cloudwatch_alarms_history` | `CLOUDWATCH_ACCOUNTS` or `CLOUDWATCH_ASSUME_ROLE` |
@@ -220,7 +220,7 @@ All configuration is via environment variables.
 | `LOKI_ENDPOINT`, `LOKI_DEFAULT_ORG_ID`, `LOKI_ORG_IDS` | Loki log queries |
 | `CLOUDWATCH_ACCOUNTS` or `CLOUDWATCH_ASSUME_ROLE`, `CLOUDWATCH_EXTERNAL_ID` | CloudWatch Logs, Metrics, and Alarms |
 | `PROMETHEUS_URL` / `PROMETHEUS_<NAME>_URL` | Prometheus queries |
-| `TEMPO_URL` / `TEMPO_<NAME>_URL` | Tempo trace lookups |
+| `TEMPO_URL` / `TEMPO_<NAME>_URL`, `TEMPO_DEFAULT_ORG_ID`, `TEMPO_ORG_IDS` | Tempo trace lookups |
 | `GRAFANA_URL`, `GRAFANA_API_KEY` | Grafana dashboard tools |
 | `DATABASE_URL` / `DATABASE_<NAME>_URL` | Read-only SQL |
 | in-cluster ServiceAccount or `KUBECONFIG` (+ optional `K8S_ENABLED`=`false` to disable, `K8S_CLUSTER_NAME` to name it) | Read-only Kubernetes tools for the bot's own cluster |
@@ -238,6 +238,42 @@ List-valued variables (e.g. `LOKI_ORG_IDS`) accept commas **and** newlines, so a
     cloudtrail
     self-monitoring
 ```
+
+### Multi-Tenant Backends
+
+Loki and Tempo name a tenant with the `X-Scope-OrgID` header. Whether a deployment uses tenants at all depends on the setup, so tenancy is configured per backend and is off by default.
+
+| Variable | Purpose |
+|----------|---------|
+| `LOKI_DEFAULT_ORG_ID` / `TEMPO_DEFAULT_ORG_ID` | Tenant used when a request names none |
+| `LOKI_ORG_IDS` / `TEMPO_ORG_IDS` | Allowlist of tenants a request may name. Accepts commas **and** newlines |
+
+- **Multi-tenancy off** (Loki `auth_enabled: false`) — leave all four unset. No header is sent, and the backend files everything under its built-in tenant (`fake` in Loki).
+- **One tenant** — set only the default (commonly `monitoring` or `logging`). Every request uses it.
+- **Several tenants** — set the allowlist, and a default that is on it. The tools gain a `tenant` argument and list the allowed tenants in their descriptions. Several tenants joined with `|` request a multi-tenant read.
+
+A default that is not on the allowlist is a configuration error: Loki refuses to start, and the Tempo tools are withheld with the reason logged. The allowlist is not a security boundary — the backend trusts whatever header it is sent. It tells the model which tenants exist and stops it inventing others. The Tempo settings apply to every configured Tempo endpoint.
+
+```yaml
+- name: LOKI_DEFAULT_ORG_ID
+  value: monitoring
+- name: LOKI_ORG_IDS
+  value: |-
+    monitoring
+    logging
+    cloudtrail
+```
+
+### Finding Logs
+
+Which backend holds a workload's logs, under which tenant and which labels, depends on the deployment. The tools are built so that an investigation finds out rather than assumes:
+
+- **Labels are discoverable.** `loki_label_names` lists the label names on Loki streams and `loki_label_values` lists the values of one label, such as every `service_name` shipping logs. Both take an optional stream selector and time window.
+- **Tenants are searched, not guessed.** With no `tenant` given, the label tools ask every allowed tenant separately and report each under its own heading, which shows which tenant holds a service. A tenant's name says nothing reliable about its contents.
+- **Metric queries return series.** `loki_query` accepts LogQL metric queries (`count_over_time`, `rate`, `sum by`) and returns each series under its labels. `step` sets the resolution and defaults to one twentieth of the time range.
+- **An empty answer says what it did not cover.** A log lookup that matches nothing names the allowed tenants it did not search, the CloudWatch accounts and log groups it did not cover, and the other log backends configured on the deployment — Loki, CloudWatch Logs, and Kubernetes pod logs. A Tempo lookup that misses names the other allowed tenants.
+
+Those notes are assembled per caller from the caller's own permissions, so they never name a tool the caller cannot use. A policy that grants `loki_query` by exact name does not grant the label tools; grant `loki_*`, or add `loki_label_names` and `loki_label_values`.
 
 ### AWS IAM Permissions
 
@@ -444,6 +480,7 @@ pkg/
   metrics/             # OpenTelemetry instruments
   observability/       # OTel metrics/tracing/log-correlation setup
   apiconfig/           # third-party API tool generation
+  tenant/              # X-Scope-OrgID tenant resolution shared by Loki and Tempo
 dashboards/            # Grafana dashboard JSON
 kubernetes/            # Kustomize deployment
 charts/diagnostic-bot/ # Helm chart

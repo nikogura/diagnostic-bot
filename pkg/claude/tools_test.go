@@ -2,6 +2,7 @@ package claude
 
 import (
 	"encoding/json"
+	"strings"
 	"testing"
 )
 
@@ -59,6 +60,32 @@ func TestGetInvestigationTools(t *testing.T) {
 		}
 		seen[tool.Name] = true
 	}
+}
+
+// TestLokiToolDescribesGeneralPurposeLogs verifies loki_query is not described
+// as a WAF-log tool, so the wording cannot drift from the MCP tool definition.
+func TestLokiToolDescribesGeneralPurposeLogs(t *testing.T) {
+	t.Parallel()
+
+	for _, tool := range GetInvestigationTools() {
+		if tool.Name != ToolLokiQuery {
+			continue
+		}
+
+		if strings.Contains(tool.Description, "for ModSecurity WAF logs") {
+			t.Errorf("Tool %s description scopes Loki to WAF logs: %s", tool.Name, tool.Description)
+		}
+
+		for _, kind := range []string{"application", "infrastructure", "audit"} {
+			if !strings.Contains(tool.Description, kind) {
+				t.Errorf("Tool %s description does not name %s logs", tool.Name, kind)
+			}
+		}
+
+		return
+	}
+
+	t.Errorf("Tool %s not found", ToolLokiQuery)
 }
 
 func TestToolDefinitionsAreValid(t *testing.T) {

@@ -46,7 +46,7 @@ func newTestServerWithTempo(t *testing.T, handler http.HandlerFunc) (testServer 
 func TestGetTempoTools(t *testing.T) {
 	t.Parallel()
 
-	tools := getTempoTools()
+	tools := getTempoTools(nil)
 	require.Len(t, tools, 3)
 
 	names := make(map[string]bool)

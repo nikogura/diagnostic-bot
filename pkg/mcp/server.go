@@ -16,6 +16,7 @@ import (
 	"github.com/nikogura/diagnostic-bot/pkg/authz"
 	"github.com/nikogura/diagnostic-bot/pkg/investigations"
 	"github.com/nikogura/diagnostic-bot/pkg/k8s"
+	"github.com/nikogura/diagnostic-bot/pkg/tenant"
 	"golang.org/x/oauth2"
 )
 
@@ -59,6 +60,7 @@ type Server struct {
 	graphqlClients                 map[string]*GraphQLClient
 	prometheusClients              map[string]*PrometheusClient
 	tempoClients                   map[string]*TempoClient
+	tempoTenants                   tenant.Policy
 	cloudWatchClientFactory        CloudWatchClientFactory
 	cloudWatchMetricsClientFactory CloudWatchMetricsClientFactory
 	apiToolRegistry                *apiconfig.APIToolRegistry
@@ -147,7 +149,7 @@ func NewServer(lokiClient *k8s.LokiClient, githubToken string, apiToolRegistry *
 
 	// Initialize Tempo clients from environment variables
 	// Supports TEMPO_URL (default) and TEMPO_<NAME>_URL patterns
-	tempoClients := LoadTempoClients(logger)
+	tempoClients, tempoTenants := loadTempo(logger)
 
 	// Get company name from environment, default to "Company"
 	companyName := os.Getenv("COMPANY_NAME")
@@ -164,6 +166,7 @@ func NewServer(lokiClient *k8s.LokiClient, githubToken string, apiToolRegistry *
 		graphqlClients:                 graphqlClients,
 		prometheusClients:              prometheusClients,
 		tempoClients:                   tempoClients,
+		tempoTenants:                   tempoTenants,
 		cloudWatchClientFactory:        defaultCloudWatchClientFactory,
 		cloudWatchMetricsClientFactory: defaultCloudWatchMetricsClientFactory,
 		apiToolRegistry:                apiToolRegistry,
@@ -210,55 +213,6 @@ func isWriteTool(name string) (isWrite bool) {
 	}
 
 	return isWrite
-}
-
-// getLokiTools returns Loki-related tool definitions. When allowedTenants
-// is non-empty (multi-tenant Loki, auth_enabled: true), the list is
-// appended to the tool description so the calling LLM can discover which
-// tenants are queryable, and the schema gains an optional tenant arg.
-func getLokiTools(allowedTenants []string) (result []MCPTool) {
-	description := "Query Loki log aggregation system for ModSecurity WAF logs. Returns JSON log entries with transaction details, blocked IPs, rule IDs, etc."
-
-	properties := map[string]interface{}{
-		"query": map[string]interface{}{
-			"type":        "string",
-			"description": "LogQL query string. Example: '{realm=\"prod\", namespace=\"ingress-nginx\"} |~ \"ModSecurity\" | json | transaction_response_http_code=\"403\"'",
-		},
-		"start": map[string]interface{}{
-			"type":        "string",
-			"description": "Start time as relative duration (e.g., '1h', '24h') or RFC3339 timestamp",
-		},
-		"end": map[string]interface{}{
-			"type":        "string",
-			"description": descEndTime,
-		},
-		"limit": map[string]interface{}{
-			"type":        "integer",
-			"description": "Maximum number of log entries to return (default: 100, recommended max: 500 to avoid token limits)",
-		},
-	}
-
-	if len(allowedTenants) > 0 {
-		description = fmt.Sprintf("%s Allowed tenants: %s.", description, strings.Join(allowedTenants, ", "))
-		properties["tenant"] = map[string]interface{}{
-			"type":        "string",
-			"description": "Loki tenant (X-Scope-OrgID) for this query. Pipe-delimited values request a multi-tenant read (e.g. 'monitoring|cloudtrail'). Omit to use the server's default tenant. Allowed values: " + strings.Join(allowedTenants, ", ") + ".",
-		}
-	}
-
-	result = []MCPTool{
-		{
-			Name:        toolLokiQuery,
-			Description: description,
-			InputSchema: map[string]interface{}{
-				"type":       "object",
-				"properties": properties,
-				"required":   []string{"query", "start"},
-			},
-		},
-	}
-
-	return result
 }
 
 // getUtilityTools returns utility tool definitions (whois, PDF generation).
@@ -859,7 +813,7 @@ func (s *Server) getToolDefinitions() (result []MCPTool) {
 	}
 
 	if len(s.tempoClients) > 0 {
-		result = append(result, getTempoTools()...)
+		result = append(result, getTempoTools(s.tempoTenants.Allowed())...)
 	}
 
 	if len(s.dbClients) > 0 {
@@ -957,8 +911,6 @@ func (s *Server) dispatchToolCall(ctx context.Context, toolName string, args map
 	switch toolName {
 	case metaToolListMyTools:
 		result, err = s.executeListMyTools(ctx, args)
-	case toolLokiQuery:
-		result, err = s.executeLokiQuery(ctx, args)
 	case toolWhoisLookup:
 		result, err = s.executeWhoisLookup(ctx, args)
 	case toolGeneratePDF:
@@ -1084,12 +1036,13 @@ func (s *Server) dispatchExtendedToolCall(ctx context.Context, toolName string, 
 	return result, err
 }
 
-// dispatchAdditionalToolCall routes GitLab, Tempo, and AWS tools, then falls
+// dispatchAdditionalToolCall routes Loki, GitLab, Tempo, and AWS tools, then falls
 // back to dynamically loaded third-party API tools. Splitting these families
 // out of dispatchExtendedToolCall keeps each switch small enough to satisfy the
 // cyclomatic-complexity budget while still routing every advertised tool.
 func (s *Server) dispatchAdditionalToolCall(ctx context.Context, toolName string, args map[string]interface{}) (result string, err error) {
 	dispatchers := []func(context.Context, string, map[string]interface{}) (string, bool, error){
+		s.dispatchLokiTool,
 		s.dispatchGitLabTool,
 		s.dispatchTempoTool,
 		s.dispatchAWSTool,
@@ -1187,41 +1140,6 @@ func (s *Server) dispatchAWSTool(ctx context.Context, toolName string, args map[
 	}
 
 	return result, handled, err
-}
-
-// executeLokiQuery executes a Loki query.
-func (s *Server) executeLokiQuery(ctx context.Context, args map[string]interface{}) (result string, err error) {
-	var queryResult k8s.QueryResult
-
-	query, _ := args["query"].(string)
-	start, _ := args["start"].(string)
-	end, _ := args["end"].(string)
-
-	limit := 100
-	if limitFloat, ok := args["limit"].(float64); ok {
-		limit = int(limitFloat)
-	}
-
-	// Cap at 500 to avoid overwhelming Claude Code with data
-	if limit > 500 {
-		limit = 500
-	}
-
-	tenant, _ := args["tenant"].(string)
-
-	queryResult, err = s.lokiClient.Query(ctx, k8s.QueryRequest{
-		Query:  query,
-		Start:  start,
-		End:    end,
-		Limit:  limit,
-		Tenant: tenant,
-	})
-	if err != nil {
-		return result, err
-	}
-
-	result = queryResult.FormatResultAsText()
-	return result, err
 }
 
 // executeWhoisLookup performs a whois lookup.

@@ -81,6 +81,9 @@ type CloudWatchQueryResult struct {
 	ResultCount int                   `json:"result_count"`
 	Results     []map[string]string   `json:"results"`
 	Statistics  *CloudWatchQueryStats `json:"statistics,omitempty"`
+
+	// Note is set when the query matched nothing, naming where else to look.
+	Note string `json:"note,omitempty"`
 }
 
 // CloudWatchQueryStats contains statistics about a CloudWatch Logs Insights query.
@@ -110,6 +113,9 @@ type CloudWatchLogEvent struct {
 // MultiAccountQueryResult wraps per-account CloudWatch Logs Insights query results.
 type MultiAccountQueryResult struct {
 	Accounts []AccountQueryResult `json:"accounts"`
+
+	// Note is set when no account matched anything, naming where else to look.
+	Note string `json:"note,omitempty"`
 }
 
 // AccountQueryResult holds the query result (or error) for a single account.
@@ -461,6 +467,12 @@ func (s *Server) executeCloudWatchLogsQuery(ctx context.Context, args map[string
 		return result, err
 	}
 
+	// An empty answer covers the log groups queried, not every place logs
+	// live on this deployment.
+	if len(queryResult.Results) == 0 {
+		queryResult.Note = s.emptyLogSearchHint(ctx, logFamilyCloudWatch, s.cloudWatchQueryLeads(ctx, nil))
+	}
+
 	// Format result as JSON
 	var resultBytes []byte
 	resultBytes, err = json.MarshalIndent(queryResult, "", "  ")
@@ -524,6 +536,11 @@ func (s *Server) executeMultiAccountQuery(
 		multiResult.Accounts = append(multiResult.Accounts, acctResult)
 	}
 
+	if !multiAccountQueryMatched(multiResult) {
+		multiResult.Note = s.emptyLogSearchHint(ctx, logFamilyCloudWatch,
+			s.cloudWatchQueryLeads(ctx, unqueriedCloudWatchAccounts(allAccounts, resolved)))
+	}
+
 	var resultBytes []byte
 	resultBytes, err = json.MarshalIndent(multiResult, "", "  ")
 	if err != nil {
@@ -534,6 +551,50 @@ func (s *Server) executeMultiAccountQuery(
 	result = string(resultBytes)
 
 	return result, err
+}
+
+// multiAccountQueryMatched reports whether any account returned a result row.
+func multiAccountQueryMatched(multiResult MultiAccountQueryResult) (matched bool) {
+	for _, acct := range multiResult.Accounts {
+		if acct.Result != nil && len(acct.Result.Results) > 0 {
+			matched = true
+			return matched
+		}
+	}
+
+	return matched
+}
+
+// unqueriedCloudWatchAccounts names the configured accounts a query did not
+// cover.
+func unqueriedCloudWatchAccounts(all, queried []CloudWatchAccountConfig) (names []string) {
+	covered := make(map[string]struct{}, len(queried))
+	for _, acct := range queried {
+		covered[acct.Name] = struct{}{}
+	}
+
+	for _, acct := range all {
+		_, done := covered[acct.Name]
+		if !done {
+			names = append(names, acct.Name)
+		}
+	}
+
+	return names
+}
+
+// cloudWatchQueryLeads lists what an empty CloudWatch Logs query has not yet
+// tried within CloudWatch: the accounts it skipped, and the other log groups.
+func (s *Server) cloudWatchQueryLeads(ctx context.Context, unqueriedAccounts []string) (leads []string) {
+	if len(unqueriedAccounts) > 0 {
+		leads = append(leads, "the CloudWatch accounts this query did not cover: "+strings.Join(unqueriedAccounts, ", "))
+	}
+
+	if s.allows(ctx, toolCloudWatchLogsListGroups) {
+		leads = append(leads, "which log groups exist ("+toolCloudWatchLogsListGroups+"), since only the groups named were searched")
+	}
+
+	return leads
 }
 
 // executeCloudWatchLogsListGroups lists CloudWatch log groups.

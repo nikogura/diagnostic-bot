@@ -126,6 +126,8 @@ func (tc ToolConfig) WriteToolUsage(builder *strings.Builder, allowed map[string
 	// Utility tools are always available
 	writeUtilityToolUsage(builder, permits)
 
+	tc.writeLogSourceGuidance(builder, permits)
+
 	builder.WriteString("Use the appropriate tools to gather data for your investigation. ")
 	builder.WriteString("Match the tool to what the user is asking about.\n\n")
 }
@@ -198,12 +200,47 @@ func hasDatabaseConfig() (available bool) {
 }
 
 func writeLokiToolUsage(builder *strings.Builder, permits func(string) bool) {
-	if !permits("loki_query") {
+	var lines strings.Builder
+	toolLine(&lines, permits, "loki_query", "Query Loki for logs of any kind the operator ships (application, infrastructure, ingress/WAF, audit). Use LogQL syntax. "+
+		"Examples: `{service_name=\"my-service\"} |= \"error\"`; `{namespace=\"ingress-nginx\"} |~ \"ModSecurity\" | json | transaction_response_http_code=\"403\"`; `{service_name=~\".*my-service.*\"}`")
+	toolLine(&lines, permits, "loki_label_names", "List the label names on Loki log streams, per tenant — how logs are labelled here")
+	toolLine(&lines, permits, "loki_label_values", "List the values of a label (e.g. every `service_name` shipping logs), per tenant — which tenant holds a service")
+	if lines.Len() == 0 {
 		return
 	}
 	builder.WriteString("**Logging (Loki):**\n")
-	builder.WriteString("- `loki_query`: Query Loki for cluster logs (ModSecurity, application logs). Use LogQL syntax.\n")
-	builder.WriteString("  Example: `{realm=\"prod\", namespace=\"ingress-nginx\"} |~ \"ModSecurity\" | json | transaction_response_http_code=\"403\"`\n\n")
+	builder.WriteString(lines.String())
+	builder.WriteString("If the stream labels are unknown, discover them or search with a regex matcher or a line filter. Do not infer what a tenant holds from its name.\n\n")
+}
+
+// writeLogSourceGuidance tells the model that logs can live in more than one
+// backend here, naming the ones this caller can search. Which backend holds a
+// workload's logs depends on the setup, so an empty answer from one of them
+// says nothing about the others.
+func (tc ToolConfig) writeLogSourceGuidance(builder *strings.Builder, permits func(string) bool) {
+	var sources []string
+
+	if tc.LokiAvailable && permits("loki_query") {
+		sources = append(sources, "Loki (`loki_query`)")
+	}
+
+	if tc.CloudWatchAvailable && permits("cloudwatch_logs_query") {
+		sources = append(sources, "CloudWatch Logs (`cloudwatch_logs_query`)")
+	}
+
+	if tc.K8sAvailable && permits("k8s_pod_logs") {
+		sources = append(sources, "Kubernetes pod logs (`k8s_pod_logs`)")
+	}
+
+	// With one log source there is nowhere else to look.
+	if len(sources) < 2 {
+		return
+	}
+
+	builder.WriteString("**Log sources:** logs on this deployment live in more than one place: ")
+	builder.WriteString(strings.Join(sources, ", "))
+	builder.WriteString(". Which one holds a given workload's logs depends on the setup. ")
+	builder.WriteString("Check each of them before concluding that logs are unavailable or live in a system you cannot reach.\n\n")
 }
 
 func writeCloudWatchToolUsage(builder *strings.Builder, permits func(string) bool) {

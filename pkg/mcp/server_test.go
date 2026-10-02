@@ -52,14 +52,12 @@ func TestGetLokiTools(t *testing.T) {
 
 	tools := getLokiTools(nil)
 
-	// Should have 1 Loki tool
-	if len(tools) != 1 {
-		t.Fatalf("getLokiTools() returned %d tools, want 1", len(tools))
+	names := make([]string, 0, len(tools))
+	for _, tool := range tools {
+		names = append(names, tool.Name)
 	}
 
-	if tools[0].Name != "loki_query" {
-		t.Errorf("getLokiTools() tool name = %s, want loki_query", tools[0].Name)
-	}
+	require.Equal(t, []string{"loki_query", "loki_label_names", "loki_label_values"}, names)
 }
 
 // TestGetLokiToolsExposesTenantArgWhenAllowlistSet verifies the loki_query
@@ -70,20 +68,23 @@ func TestGetLokiToolsExposesTenantArgWhenAllowlistSet(t *testing.T) {
 	t.Parallel()
 
 	tools := getLokiTools([]string{"monitoring", "cloudtrail", "self-monitoring"})
-	require.Len(t, tools, 1)
+	require.Len(t, tools, 3)
 
-	require.Contains(t, tools[0].Description, "monitoring")
-	require.Contains(t, tools[0].Description, "cloudtrail")
-	require.Contains(t, tools[0].Description, "self-monitoring")
+	// Every Loki tool is tenant-aware, the label tools as much as the query.
+	for _, tool := range tools {
+		require.Contains(t, tool.Description, "monitoring", tool.Name)
+		require.Contains(t, tool.Description, "cloudtrail", tool.Name)
+		require.Contains(t, tool.Description, "self-monitoring", tool.Name)
 
-	props, ok := tools[0].InputSchema["properties"].(map[string]interface{})
-	require.True(t, ok, "schema must have properties")
-	require.Contains(t, props, "tenant", "tenant arg must appear in schema")
+		props, ok := tool.InputSchema["properties"].(map[string]interface{})
+		require.True(t, ok, "%s schema must have properties", tool.Name)
+		require.Contains(t, props, "tenant", "tenant arg must appear in the %s schema", tool.Name)
 
-	// tenant must NOT be in the required list — it's optional and defaults
-	// to the server-configured default tenant when omitted.
-	required, _ := tools[0].InputSchema["required"].([]string)
-	require.NotContains(t, required, "tenant")
+		// tenant must NOT be in the required list — it's optional and defaults
+		// to the server-configured default tenant when omitted.
+		required, _ := tool.InputSchema["required"].([]string)
+		require.NotContains(t, required, "tenant", tool.Name)
+	}
 }
 
 // TestGetLokiToolsOmitsTenantDescriptionWhenNoAllowlist verifies that
@@ -93,8 +94,61 @@ func TestGetLokiToolsOmitsTenantDescriptionWhenNoAllowlist(t *testing.T) {
 	t.Parallel()
 
 	tools := getLokiTools(nil)
-	require.Len(t, tools, 1)
-	require.NotContains(t, tools[0].Description, "Allowed tenants")
+	require.Len(t, tools, 3)
+
+	for _, tool := range tools {
+		require.NotContains(t, tool.Description, "Allowed tenants", tool.Name)
+
+		props, ok := tool.InputSchema["properties"].(map[string]interface{})
+		require.True(t, ok, "%s schema must have properties", tool.Name)
+		require.NotContains(t, props, "tenant", "%s must not offer a tenant arg without an allowlist", tool.Name)
+	}
+}
+
+// TestGetLokiToolsDescribesGeneralPurposeLogs verifies loki_query is described
+// as a general-purpose log tool. A description scoped to one log kind is read
+// literally by the calling model, which then looks elsewhere for every other
+// kind and reports the logs as unavailable.
+func TestGetLokiToolsDescribesGeneralPurposeLogs(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name           string
+		allowedTenants []string
+	}{
+		{name: "single tenant", allowedTenants: nil},
+		{name: "multi tenant", allowedTenants: []string{"monitoring", "cloudtrail"}},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			tools := getLokiTools(tt.allowedTenants)
+			require.Equal(t, toolLokiQuery, tools[0].Name)
+
+			description := tools[0].Description
+			require.NotContains(t, description, "for ModSecurity WAF logs", "description must not scope Loki to WAF logs")
+
+			for _, kind := range []string{"application", "infrastructure", "audit"} {
+				require.Contains(t, description, kind, "description must name %s logs", kind)
+			}
+
+			require.Contains(t, description, "regex matcher", "description must say how to search when labels are unknown")
+			require.Contains(t, description, "before querying here", "description must forbid concluding logs are unavailable unqueried")
+
+			props, ok := tools[0].InputSchema["properties"].(map[string]interface{})
+			require.True(t, ok, "schema must have properties")
+
+			query, ok := props["query"].(map[string]interface{})
+			require.True(t, ok, "schema must have a query property")
+
+			queryDescription, ok := query["description"].(string)
+			require.True(t, ok, "query property must have a description")
+			require.Contains(t, queryDescription, "service_name", "query examples must include a non-WAF selector")
+			require.NotContains(t, queryDescription, "realm=", "query examples must not assume a deployment-specific label")
+		})
+	}
 }
 
 // TestExecuteLokiQueryPassesTenantToBackend verifies the executor reads the

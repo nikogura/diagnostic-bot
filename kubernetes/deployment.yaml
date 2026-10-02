@@ -49,6 +49,24 @@ spec:
             # List-valued vars accept commas AND newlines; a block scalar stays readable.
             - name: LOKI_ENDPOINT
               value: "http://loki-gateway.monitoring.svc:80"
+            # Tenancy for Loki and Tempo (X-Scope-OrgID). Omit all of these when
+            # the backend runs without multi-tenancy: no header is sent and the
+            # backend uses its built-in tenant ("fake" in Loki). Otherwise
+            # *_DEFAULT_ORG_ID is the tenant used when a request names none, and
+            # *_ORG_IDS is the allowlist of tenants a request may name. See the
+            # README, "Multi-Tenant Backends".
+            # - name: LOKI_DEFAULT_ORG_ID
+            #   value: "monitoring"
+            # - name: LOKI_ORG_IDS
+            #   value: |
+            #     monitoring
+            #     logging
+            # - name: TEMPO_DEFAULT_ORG_ID
+            #   value: "monitoring"
+            # - name: TEMPO_ORG_IDS
+            #   value: |
+            #     monitoring
+            #     platform
             # OTLP endpoint is optional; tracing is no-op when unset.
             - name: OTEL_EXPORTER_OTLP_ENDPOINT
               value: "http://tempo-distributor.monitoring.svc:4318"

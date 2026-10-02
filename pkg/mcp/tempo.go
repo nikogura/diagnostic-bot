@@ -9,8 +9,11 @@ import (
 	"log/slog"
 	"net/http"
 	"os"
+	"sort"
 	"strings"
 	"time"
+
+	"github.com/nikogura/diagnostic-bot/pkg/tenant"
 )
 
 // Tool name constants for Tempo tools.
@@ -21,6 +24,14 @@ const (
 )
 
 const tempoTimeout = 30 * time.Second
+
+// Tempo tenancy mirrors Loki's: an optional default tenant and an optional
+// allowlist, applied to every configured Tempo endpoint.
+const (
+	tempoBackend          = "tempo"
+	envTempoDefaultTenant = "TEMPO_DEFAULT_ORG_ID"
+	envTempoTenants       = "TEMPO_ORG_IDS"
+)
 
 // TempoClient is an HTTP client for querying Grafana Tempo.
 type TempoClient struct {
@@ -100,55 +111,104 @@ func LoadTempoClients(logger *slog.Logger) (clients map[string]*TempoClient) {
 	return clients
 }
 
-// getTempoTools returns Tempo-related tool definitions.
-func getTempoTools() (result []MCPTool) {
+// loadTempoTenants reads the Tempo tenant configuration from the environment.
+// With neither variable set the policy is empty and no tenant header is sent,
+// which is what a Tempo without multi-tenancy expects.
+func loadTempoTenants() (policy tenant.Policy, err error) {
+	policy, err = tenant.NewPolicy(tempoBackend, os.Getenv(envTempoDefaultTenant), tenant.ParseIDs(os.Getenv(envTempoTenants)))
+	return policy, err
+}
+
+// loadTempo loads the Tempo clients and their tenant configuration from the
+// environment. A tenant configuration that cannot be applied withholds the
+// Tempo tools — no clients are returned — rather than querying under a tenant
+// the operator did not intend.
+func loadTempo(logger *slog.Logger) (clients map[string]*TempoClient, tenants tenant.Policy) {
+	var err error
+
+	tenants, err = loadTempoTenants()
+	if err != nil {
+		logger.Error("invalid Tempo tenant configuration - Tempo tools will be unavailable until corrected",
+			slog.String("error", err.Error()))
+
+		clients = map[string]*TempoClient{}
+
+		return clients, tenants
+	}
+
+	clients = LoadTempoClients(logger)
+
+	return clients, tenants
+}
+
+// getTempoTools returns Tempo-related tool definitions. When allowedTenants is
+// non-empty (multi-tenant Tempo), the trace tools gain an optional tenant arg
+// and their descriptions list the tenants a caller may name.
+func getTempoTools(allowedTenants []string) (result []MCPTool) {
+	traceProperties := map[string]interface{}{
+		"trace_id": map[string]interface{}{
+			"type":        "string",
+			"description": "Trace ID to look up (hex string, e.g., '2f3e4a5b6c7d8e9f0a1b2c3d4e5f6a7b')",
+		},
+		"endpoint": map[string]interface{}{
+			"type":        "string",
+			"description": "Named Tempo endpoint to query. Defaults to 'default'.",
+		},
+	}
+
+	searchProperties := map[string]interface{}{
+		"tags": map[string]interface{}{
+			"type":        "string",
+			"description": "Tag search query (e.g., 'service.name=api-service status.code=error http.method=GET')",
+		},
+		argStart: map[string]interface{}{
+			"type":        "string",
+			"description": "Start time as relative duration (e.g., '1h', '24h') or Unix epoch seconds",
+		},
+		argEnd: map[string]interface{}{
+			"type":        "string",
+			"description": descEndTime,
+		},
+		"limit": map[string]interface{}{
+			"type":        "integer",
+			"description": "Maximum number of traces to return (default: 20)",
+		},
+		"endpoint": map[string]interface{}{
+			"type":        "string",
+			"description": "Named Tempo endpoint to query. Defaults to 'default'.",
+		},
+	}
+
+	if len(allowedTenants) > 0 {
+		tenantProperty := map[string]interface{}{
+			"type":        "string",
+			"description": "Tempo tenant (X-Scope-OrgID) to search. Pipe-delimited values request a multi-tenant read (e.g. 'monitoring|platform'). Omit to use the server's default tenant. Do not infer what a tenant holds from its name. Allowed values: " + strings.Join(allowedTenants, ", ") + ".",
+		}
+		traceProperties[argTenant] = tenantProperty
+		searchProperties[argTenant] = tenantProperty
+	}
+
 	result = []MCPTool{
 		{
-			Name:        toolTempoGetTrace,
-			Description: "Fetch a distributed trace by trace ID from Grafana Tempo. Returns all spans with service names, operations, durations, and errors.",
+			Name: toolTempoGetTrace,
+			Description: withAllowedTenants(
+				"Fetch a distributed trace by trace ID from Grafana Tempo. Returns all spans with service names, operations, durations, and errors.",
+				allowedTenants),
 			InputSchema: map[string]interface{}{
-				"type": "object",
-				"properties": map[string]interface{}{
-					"trace_id": map[string]interface{}{
-						"type":        "string",
-						"description": "Trace ID to look up (hex string, e.g., '2f3e4a5b6c7d8e9f0a1b2c3d4e5f6a7b')",
-					},
-					"endpoint": map[string]interface{}{
-						"type":        "string",
-						"description": "Named Tempo endpoint to query. Defaults to 'default'.",
-					},
-				},
-				"required": []string{"trace_id"},
+				"type":       "object",
+				"properties": traceProperties,
+				"required":   []string{"trace_id"},
 			},
 		},
 		{
-			Name:        toolTempoSearchTraces,
-			Description: "Search for traces in Grafana Tempo by tags and time range. Returns matching trace IDs with metadata.",
+			Name: toolTempoSearchTraces,
+			Description: withAllowedTenants(
+				"Search for traces in Grafana Tempo by tags and time range. Returns matching trace IDs with metadata.",
+				allowedTenants),
 			InputSchema: map[string]interface{}{
-				"type": "object",
-				"properties": map[string]interface{}{
-					"tags": map[string]interface{}{
-						"type":        "string",
-						"description": "Tag search query (e.g., 'service.name=api-service status.code=error http.method=GET')",
-					},
-					"start": map[string]interface{}{
-						"type":        "string",
-						"description": "Start time as relative duration (e.g., '1h', '24h') or Unix epoch seconds",
-					},
-					"end": map[string]interface{}{
-						"type":        "string",
-						"description": descEndTime,
-					},
-					"limit": map[string]interface{}{
-						"type":        "integer",
-						"description": "Maximum number of traces to return (default: 20)",
-					},
-					"endpoint": map[string]interface{}{
-						"type":        "string",
-						"description": "Named Tempo endpoint to query. Defaults to 'default'.",
-					},
-				},
-				"required": []string{"tags"},
+				"type":       "object",
+				"properties": searchProperties,
+				"required":   []string{"tags"},
 			},
 		},
 		{
@@ -178,16 +238,31 @@ func (s *Server) executeTempoGetTrace(ctx context.Context, args map[string]inter
 		return result, err
 	}
 
+	var tenantID string
+	tenantID, err = s.resolveTempoTenant(args)
+	if err != nil {
+		return result, err
+	}
+
 	url := fmt.Sprintf("%s/api/traces/%s", client.baseURL, traceID)
 
 	var body []byte
-	body, err = client.makeRequest(ctx, url)
+	body, err = client.makeRequest(ctx, url, tenantID)
 	if err != nil {
+		// A trace lives in one tenant. A miss in the tenant searched says
+		// nothing about the others, so name them.
+		unsearched := s.tempoTenants.Unsearched(tenantID)
+		if len(unsearched) > 0 {
+			err = fmt.Errorf("%w (searched tenant %q; other allowed tenants not searched: %s)",
+				err, tenantID, strings.Join(unsearched, ", "))
+		}
+
 		return result, err
 	}
 
 	s.logger.InfoContext(ctx, "fetched trace from Tempo",
 		slog.String("endpoint", client.name),
+		slog.String("tenant", tenantID),
 		slog.String("trace_id", traceID),
 		slog.Int("response_bytes", len(body)))
 
@@ -226,21 +301,63 @@ func (s *Server) executeTempoSearchTraces(ctx context.Context, args map[string]i
 	}
 	params += fmt.Sprintf("&limit=%d", limit)
 
+	var tenantID string
+	tenantID, err = s.resolveTempoTenant(args)
+	if err != nil {
+		return result, err
+	}
+
 	url := fmt.Sprintf("%s/api/search?%s", client.baseURL, params)
 
 	var body []byte
-	body, err = client.makeRequest(ctx, url)
+	body, err = client.makeRequest(ctx, url, tenantID)
 	if err != nil {
 		return result, err
 	}
 
 	s.logger.InfoContext(ctx, "searched traces in Tempo",
 		slog.String("endpoint", client.name),
+		slog.String("tenant", tenantID),
 		slog.String("tags", tags),
 		slog.Int("response_bytes", len(body)))
 
 	result = formatTempoResponse(body)
+
+	// An empty search covers only the tenant searched; name the rest.
+	unsearched := s.tempoTenants.Unsearched(tenantID)
+	if len(unsearched) > 0 && tempoSearchEmpty(body) {
+		result += fmt.Sprintf("\n\nNo traces matched in tenant %q. Other allowed tenants not searched: %s (pass tenant, joining several with '|').",
+			tenantID, strings.Join(unsearched, ", "))
+	}
+
 	return result, err
+}
+
+// resolveTempoTenant returns the tenant header value for a Tempo tool call,
+// applying the default and checking the allowlist.
+func (s *Server) resolveTempoTenant(args map[string]interface{}) (tenantID string, err error) {
+	requested, _ := args[argTenant].(string)
+
+	tenantID, err = s.tempoTenants.Resolve(requested)
+
+	return tenantID, err
+}
+
+// tempoSearchEmpty reports whether a Tempo search response matched no traces.
+// An unparseable body is not treated as empty.
+func tempoSearchEmpty(body []byte) (empty bool) {
+	var parsed struct {
+		Traces []json.RawMessage `json:"traces"`
+	}
+
+	parseErr := json.Unmarshal(body, &parsed)
+	if parseErr != nil {
+		return empty
+	}
+
+	empty = len(parsed.Traces) == 0
+
+	return empty
 }
 
 // executeTempoListEndpoints lists configured Tempo endpoints.
@@ -255,7 +372,24 @@ func (s *Server) executeTempoListEndpoints(_ context.Context, _ map[string]inter
 		endpoints = append(endpoints, fmt.Sprintf("  %s: %s", name, client.baseURL))
 	}
 
+	sort.Strings(endpoints)
+
 	result = fmt.Sprintf("Configured Tempo endpoints (%d):\n%s", len(endpoints), strings.Join(endpoints, "\n"))
+
+	if s.tempoTenants.Configured() {
+		defaultTenant := s.tempoTenants.Default()
+		if defaultTenant == "" {
+			defaultTenant = "none (tenant must be passed)"
+		}
+
+		result += "\n\nTenants (X-Scope-OrgID): default " + defaultTenant
+
+		allowed := s.tempoTenants.Allowed()
+		if len(allowed) > 0 {
+			result += "; allowed " + strings.Join(allowed, ", ")
+		}
+	}
+
 	return result, err
 }
 
@@ -286,8 +420,9 @@ func (s *Server) resolveTempoClient(args map[string]interface{}) (client *TempoC
 	return client, err
 }
 
-// makeRequest performs an HTTP GET request and returns the response body.
-func (c *TempoClient) makeRequest(ctx context.Context, url string) (body []byte, err error) {
+// makeRequest performs an HTTP GET request as tenantID and returns the response
+// body. An empty tenantID sends no X-Scope-OrgID header.
+func (c *TempoClient) makeRequest(ctx context.Context, url string, tenantID string) (body []byte, err error) {
 	var req *http.Request
 	req, err = http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {
@@ -296,6 +431,10 @@ func (c *TempoClient) makeRequest(ctx context.Context, url string) (body []byte,
 	}
 
 	req.Header.Set("Accept", "application/json")
+
+	if tenantID != "" {
+		req.Header.Set(tenant.Header, tenantID)
+	}
 
 	var resp *http.Response
 	resp, err = c.httpClient.Do(req)

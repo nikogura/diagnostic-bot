@@ -21,13 +21,13 @@ func GetInvestigationTools() (result []anthropic.ToolDefinition) {
 	result = []anthropic.ToolDefinition{
 		{
 			Name:        ToolLokiQuery,
-			Description: "Query Loki log aggregation system for ModSecurity WAF logs and other application logs. Use LogQL query syntax. Returns JSON log entries.",
+			Description: "Query a Loki log aggregation backend using LogQL. Loki is general-purpose: it holds whatever log streams the operator ships — commonly application, infrastructure, ingress/WAF, and audit logs. Returns the matching log lines with their timestamps.",
 			InputSchema: map[string]interface{}{
 				"type": "object",
 				"properties": map[string]interface{}{
 					"query": map[string]interface{}{
 						"type":        "string",
-						"description": "LogQL query string (e.g., '{realm=\"prod\", namespace=\"ingress-nginx\"} |~ \"ModSecurity\" | json | transaction_response_http_code=\"403\"')",
+						"description": "LogQL log query (e.g., '{service_name=\"my-service\"} |= \"error\"' or '{namespace=\"ingress-nginx\"} |~ \"ModSecurity\" | json | transaction_response_http_code=\"403\"')",
 					},
 					"start": map[string]interface{}{
 						"type":        "string",

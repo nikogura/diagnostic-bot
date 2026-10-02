@@ -214,6 +214,113 @@ func TestWriteToolUsageWithLoki(t *testing.T) {
 	assert.NotContains(t, output, "cloudwatch_logs_query", "Should not include CloudWatch")
 }
 
+// TestWriteToolUsageDescribesLokiAsGeneralPurpose verifies the Slack prompt
+// prose presents loki_query as covering every log kind, matching the tool
+// description the model is given alongside it.
+func TestWriteToolUsageDescribesLokiAsGeneralPurpose(t *testing.T) {
+	t.Parallel()
+
+	config := ToolConfig{LokiAvailable: true}
+
+	var builder strings.Builder
+	config.WriteToolUsage(&builder, nil)
+	output := builder.String()
+
+	assert.NotContains(t, output, "(ModSecurity, application logs)", "Should not scope Loki to WAF and application logs")
+	assert.NotContains(t, output, "realm=", "Should not assume a deployment-specific label")
+
+	for _, kind := range []string{"application", "infrastructure", "audit"} {
+		assert.Contains(t, output, kind, "Should name %s logs", kind)
+	}
+
+	assert.Contains(t, output, "regex matcher", "Should say how to search when labels are unknown")
+	assert.Contains(t, output, "service_name", "Should include a non-WAF example")
+	assert.Contains(t, output, "loki_label_names", "Should include label-name discovery")
+	assert.Contains(t, output, "loki_label_values", "Should include label-value discovery")
+}
+
+// TestWriteToolUsageLokiRespectsPermissions verifies each Loki tool is
+// described only to a caller who may dispatch it.
+func TestWriteToolUsageLokiRespectsPermissions(t *testing.T) {
+	t.Parallel()
+
+	config := ToolConfig{LokiAvailable: true}
+
+	var builder strings.Builder
+	config.WriteToolUsage(&builder, map[string]bool{"loki_query": true})
+	output := builder.String()
+
+	assert.Contains(t, output, "`loki_query`")
+	assert.NotContains(t, output, "loki_label_names", "Should not describe a tool the caller cannot use")
+	assert.NotContains(t, output, "loki_label_values", "Should not describe a tool the caller cannot use")
+
+	builder.Reset()
+	config.WriteToolUsage(&builder, map[string]bool{"whois_lookup": true})
+
+	assert.NotContains(t, builder.String(), "Loki", "Should omit the Loki section when no Loki tool is permitted")
+}
+
+// TestWriteToolUsageLogSourceGuidance verifies the prompt tells the model to
+// check every log backend this deployment has — and names only the ones that
+// are configured and permitted.
+func TestWriteToolUsageLogSourceGuidance(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name        string
+		config      ToolConfig
+		allowed     map[string]bool
+		wantSources []string
+		wantAbsent  []string
+	}{
+		{
+			name:        "loki and cloudwatch",
+			config:      ToolConfig{LokiAvailable: true, CloudWatchAvailable: true},
+			wantSources: []string{"Loki (`loki_query`)", "CloudWatch Logs (`cloudwatch_logs_query`)"},
+			wantAbsent:  []string{"Kubernetes pod logs"},
+		},
+		{
+			name:        "all three",
+			config:      ToolConfig{LokiAvailable: true, CloudWatchAvailable: true, K8sAvailable: true},
+			wantSources: []string{"Loki (`loki_query`)", "CloudWatch Logs (`cloudwatch_logs_query`)", "Kubernetes pod logs (`k8s_pod_logs`)"},
+		},
+		{
+			name:       "single source needs no guidance",
+			config:     ToolConfig{LokiAvailable: true},
+			wantAbsent: []string{"**Log sources:**"},
+		},
+		{
+			name:       "an unpermitted source is not named",
+			config:     ToolConfig{LokiAvailable: true, CloudWatchAvailable: true},
+			allowed:    map[string]bool{"loki_query": true},
+			wantAbsent: []string{"**Log sources:**", "CloudWatch"},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			var builder strings.Builder
+			tt.config.WriteToolUsage(&builder, tt.allowed)
+			output := builder.String()
+
+			if len(tt.wantSources) > 0 {
+				assert.Contains(t, output, "**Log sources:**")
+				assert.Contains(t, output, "Check each of them before concluding")
+			}
+
+			for _, source := range tt.wantSources {
+				assert.Contains(t, output, source)
+			}
+
+			for _, absent := range tt.wantAbsent {
+				assert.NotContains(t, output, absent)
+			}
+		})
+	}
+}
+
 func TestWriteToolUsageWithCloudWatch(t *testing.T) {
 	t.Parallel()
 

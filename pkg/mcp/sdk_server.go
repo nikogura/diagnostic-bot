@@ -201,8 +201,16 @@ func (s *SDKServer) registerLokiTools() {
 		return
 	}
 
+	handlers := map[string]func(context.Context, map[string]interface{}) (string, error){
+		toolLokiQuery:       s.legacy.executeLokiQuery,
+		toolLokiLabelNames:  s.legacy.executeLokiLabelNames,
+		toolLokiLabelValues: s.legacy.executeLokiLabelValues,
+	}
+
 	for _, t := range getLokiTools(s.legacy.lokiClient.AllowedTenants()) {
-		s.registerTool(t.Name, t.Description, t.InputSchema, s.legacy.executeLokiQuery)
+		if h, ok := handlers[t.Name]; ok {
+			s.registerTool(t.Name, t.Description, t.InputSchema, h)
+		}
 	}
 }
 
@@ -417,7 +425,7 @@ func (s *SDKServer) registerTempoTools() {
 		toolTempoListEndpoints: s.legacy.executeTempoListEndpoints,
 	}
 
-	for _, t := range getTempoTools() {
+	for _, t := range getTempoTools(s.legacy.tempoTenants.Allowed()) {
 		if h, ok := handlers[t.Name]; ok {
 			s.registerTool(t.Name, t.Description, t.InputSchema, h)
 		}

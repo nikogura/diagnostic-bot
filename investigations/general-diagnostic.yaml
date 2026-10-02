@@ -119,9 +119,14 @@ initial_prompt: |
 
   ### `loki_query`
   Query Loki log aggregation using LogQL.
-  - **Use for**: Application logs, time-series log analysis
+  - **Use for**: Logs of any kind shipped to Loki, time-series log analysis
   - **Syntax**: LogQL (e.g., `{namespace="default",app="myapp"} |= "error"`)
   - **Time range**: Relative ("1h", "24h") or RFC3339 timestamps
+
+  ### `loki_label_names` / `loki_label_values`
+  Discover how logs are labelled before writing a query.
+  - **Use for**: Finding the selector for a service, and which tenant holds it
+  - **Tenants**: Omit `tenant` to inspect every allowed tenant, reported separately
 
   ### `get_k8s_pod_logs`
   Fetch logs directly from Kubernetes pods.
