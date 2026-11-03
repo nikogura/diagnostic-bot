@@ -1,7 +1,7 @@
 # Build stage - Debian bookworm, matching the distroless-debian12 runtime base
 # (build on the same platform we run on). Go cross-compiles natively via
 # GOOS/GOARCH — no QEMU needed.
-FROM --platform=$BUILDPLATFORM golang:1.25-bookworm AS builder
+FROM --platform=$BUILDPLATFORM golang:1.27-bookworm AS builder
 
 # TARGETOS / TARGETARCH are supplied automatically by `docker buildx build`
 # when invoked with --platform. We deliberately declare them WITHOUT defaults

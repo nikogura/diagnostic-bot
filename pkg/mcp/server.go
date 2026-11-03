@@ -63,6 +63,7 @@ type Server struct {
 	tempoTenants                   tenant.Policy
 	cloudWatchClientFactory        CloudWatchClientFactory
 	cloudWatchMetricsClientFactory CloudWatchMetricsClientFactory
+	ecsClientFactory               ECSClientFactory
 	apiToolRegistry                *apiconfig.APIToolRegistry
 	k8sClusters                    map[string]*k8s.Agent
 	logger                         *slog.Logger
@@ -169,6 +170,7 @@ func NewServer(lokiClient *k8s.LokiClient, githubToken string, apiToolRegistry *
 		tempoTenants:                   tempoTenants,
 		cloudWatchClientFactory:        defaultCloudWatchClientFactory,
 		cloudWatchMetricsClientFactory: defaultCloudWatchMetricsClientFactory,
+		ecsClientFactory:               defaultECSClientFactory,
 		apiToolRegistry:                apiToolRegistry,
 		k8sClusters:                    loadK8sClusters(logger),
 		logger:                         logger,
@@ -1127,6 +1129,18 @@ func (s *Server) dispatchAWSTool(ctx context.Context, toolName string, args map[
 		result, err = s.executeEC2DescribeSecurityGroups(ctx, args)
 	case toolEC2DescribeNATGateways:
 		result, err = s.executeEC2DescribeNATGateways(ctx, args)
+	case toolECSListClusters:
+		result, err = s.executeECSListClusters(ctx, args)
+	case toolECSListServices:
+		result, err = s.executeECSListServices(ctx, args)
+	case toolECSDescribeServices:
+		result, err = s.executeECSDescribeServices(ctx, args)
+	case toolECSListTasks:
+		result, err = s.executeECSListTasks(ctx, args)
+	case toolECSDescribeTasks:
+		result, err = s.executeECSDescribeTasks(ctx, args)
+	case toolECSDescribeTaskDefinition:
+		result, err = s.executeECSDescribeTaskDefinition(ctx, args)
 	case toolRoute53ListHostedZones:
 		result, err = s.executeRoute53ListHostedZones(ctx, args)
 	case toolRoute53ListRecords:

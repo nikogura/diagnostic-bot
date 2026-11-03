@@ -27,7 +27,7 @@ func TestGetAWSTools(t *testing.T) {
 	t.Parallel()
 
 	tools := getAWSTools()
-	require.Len(t, tools, 11)
+	require.Len(t, tools, 17)
 
 	names := make(map[string]bool)
 	for _, tool := range tools {
@@ -41,6 +41,12 @@ func TestGetAWSTools(t *testing.T) {
 	assert.True(t, names[toolEC2DescribeSubnets])
 	assert.True(t, names[toolEC2DescribeSecurityGroups])
 	assert.True(t, names[toolEC2DescribeNATGateways])
+	assert.True(t, names[toolECSListClusters])
+	assert.True(t, names[toolECSListServices])
+	assert.True(t, names[toolECSDescribeServices])
+	assert.True(t, names[toolECSListTasks])
+	assert.True(t, names[toolECSDescribeTasks])
+	assert.True(t, names[toolECSDescribeTaskDefinition])
 	assert.True(t, names[toolRoute53ListHostedZones])
 	assert.True(t, names[toolRoute53ListRecords])
 	assert.True(t, names[toolS3ListBuckets])
@@ -144,9 +150,14 @@ func TestAWSToolsRequiredFields(t *testing.T) {
 
 	// Tools that require specific fields
 	requiresField := map[string][]string{
-		toolIAMGetRole:         {"role_name"},
-		toolRoute53ListRecords: {"zone_id"},
-		toolS3GetBucketPolicy:  {"bucket"},
+		toolIAMGetRole:                {"role_name"},
+		toolRoute53ListRecords:        {"zone_id"},
+		toolS3GetBucketPolicy:         {"bucket"},
+		toolECSListServices:           {"cluster"},
+		toolECSDescribeServices:       {"cluster", "services"},
+		toolECSListTasks:              {"cluster"},
+		toolECSDescribeTasks:          {"cluster", "tasks"},
+		toolECSDescribeTaskDefinition: {"task_definition"},
 	}
 
 	tools := getAWSTools()

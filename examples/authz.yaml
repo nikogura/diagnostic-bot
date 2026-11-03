@@ -28,6 +28,7 @@ authz:
         - "prometheus_*"
         - "tempo_*"
         - "cloudwatch_*"
+        - "ecs_*"
         - "whois_lookup"
 
     # Platform engineers: read-only plus AWS network/describe reads.
@@ -35,6 +36,7 @@ authz:
       tools:
         - "k8s_*"
         - "ec2_describe_*"
+        - "ecs_*"
         - "cloudwatch_*"
         - "prometheus_*"
         - "loki_*"

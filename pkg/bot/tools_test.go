@@ -360,6 +360,8 @@ func TestWriteToolUsageAdditionalFamilies(t *testing.T) {
 		"tempo_search_traces",
 		"sts_get_caller_identity",
 		"ec2_describe_vpcs",
+		"ecs_describe_services",
+		"ecs_describe_task_definition",
 		"s3_list_buckets",
 		"graphql_query",
 		"graphql_list_endpoints",

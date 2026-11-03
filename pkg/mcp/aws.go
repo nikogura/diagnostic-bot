@@ -45,15 +45,7 @@ const (
 // loadAWSConfig creates an AWS config for the given region.
 // If AWS_ASSUME_ROLE is set, it configures cross-account role assumption.
 func loadAWSConfig(ctx context.Context, region string) (cfg aws.Config, err error) {
-	if region == "" {
-		region = os.Getenv("AWS_REGION")
-		if region == "" {
-			region = os.Getenv("AWS_DEFAULT_REGION")
-		}
-		if region == "" {
-			region = defaultAWSRegion
-		}
-	}
+	region = resolveAWSRegion(region)
 
 	cfg, err = config.LoadDefaultConfig(ctx, config.WithRegion(region))
 	if err != nil {
@@ -88,6 +80,23 @@ func loadAWSConfig(ctx context.Context, region string) (cfg aws.Config, err erro
 	return cfg, err
 }
 
+// resolveAWSRegion returns the region to query: the caller's, else the
+// environment's (AWS_REGION, then AWS_DEFAULT_REGION), else the default.
+func resolveAWSRegion(region string) (resolved string) {
+	resolved = region
+	if resolved == "" {
+		resolved = os.Getenv("AWS_REGION")
+	}
+	if resolved == "" {
+		resolved = os.Getenv("AWS_DEFAULT_REGION")
+	}
+	if resolved == "" {
+		resolved = defaultAWSRegion
+	}
+
+	return resolved
+}
+
 // awsConfigured reports whether an AWS region is configured. It is the single,
 // cheap, deterministic gate for the ECR and AWS read tools — used by BOTH the
 // MCP transport (SDK registration) and the legacy dispatch path
@@ -117,6 +126,7 @@ func getAWSTools() (result []MCPTool) {
 	result = append(result, getSTSTools()...)
 	result = append(result, getIAMTools()...)
 	result = append(result, getEC2Tools()...)
+	result = append(result, getECSTools()...)
 	result = append(result, getRoute53Tools()...)
 	result = append(result, getS3Tools()...)
 	return result

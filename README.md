@@ -34,6 +34,7 @@ All tools are read-only except the Grafana dashboard-management tools. Each grou
 | GitHub | `github_get_file`, `github_list_directory`, `github_search_code` | `GITHUB_TOKEN` |
 | GitLab | `gitlab_get_file`, `gitlab_list_directory`, `gitlab_search_code` | `GITLAB_TOKEN` |
 | AWS (read) | `sts_get_caller_identity`, `iam_list_roles`, `iam_get_role`, `ec2_describe_vpcs`, `ec2_describe_subnets`, `ec2_describe_security_groups`, `ec2_describe_nat_gateways`, `route53_list_hosted_zones`, `route53_list_records`, `s3_list_buckets`, `s3_get_bucket_policy` | `AWS_REGION` / `AWS_DEFAULT_REGION` |
+| Containers (ECS) | `ecs_list_clusters`, `ecs_list_services`, `ecs_describe_services`, `ecs_list_tasks`, `ecs_describe_tasks`, `ecs_describe_task_definition` | `AWS_REGION` / `AWS_DEFAULT_REGION`; per-account roles from `CLOUDWATCH_ACCOUNTS` |
 | Container scans (ECR) | `ecr_scan_results` | `AWS_REGION` / `AWS_DEFAULT_REGION` |
 | GraphQL | `graphql_query`, `graphql_list_endpoints` | `GRAPHQL_URL` / `GRAPHQL_<NAME>_URL` |
 | Utility | `whois_lookup`, `generate_pdf`, `list_my_tools` | always available |
@@ -218,7 +219,7 @@ All configuration is via environment variables.
 | Variable | Enables |
 |----------|---------|
 | `LOKI_ENDPOINT`, `LOKI_DEFAULT_ORG_ID`, `LOKI_ORG_IDS` | Loki log queries |
-| `CLOUDWATCH_ACCOUNTS` or `CLOUDWATCH_ASSUME_ROLE`, `CLOUDWATCH_EXTERNAL_ID` | CloudWatch Logs, Metrics, and Alarms |
+| `CLOUDWATCH_ACCOUNTS` or `CLOUDWATCH_ASSUME_ROLE`, `CLOUDWATCH_EXTERNAL_ID` | CloudWatch Logs, Metrics, and Alarms; `CLOUDWATCH_ACCOUNTS` also names the accounts the ECS tools can be pointed at |
 | `PROMETHEUS_URL` / `PROMETHEUS_<NAME>_URL` | Prometheus queries |
 | `TEMPO_URL` / `TEMPO_<NAME>_URL`, `TEMPO_DEFAULT_ORG_ID`, `TEMPO_ORG_IDS` | Tempo trace lookups |
 | `GRAFANA_URL`, `GRAFANA_API_KEY` | Grafana dashboard tools |
@@ -313,6 +314,12 @@ Scope `Resource` as tightly as your environment allows:
         "ec2:DescribeSubnets",
         "ec2:DescribeSecurityGroups",
         "ec2:DescribeNatGateways",
+        "ecs:ListClusters",
+        "ecs:ListServices",
+        "ecs:DescribeServices",
+        "ecs:ListTasks",
+        "ecs:DescribeTasks",
+        "ecs:DescribeTaskDefinition",
         "route53:ListHostedZones",
         "route53:ListResourceRecordSets",
         "s3:ListAllMyBuckets",
@@ -328,8 +335,8 @@ Scope `Resource` as tightly as your environment allows:
 ```
 
 The CloudWatch statement backs the Logs/Metrics/Alarms tools; the second backs
-the AWS read tools (`sts_*`, `iam_*`, `ec2_describe_*`, `route53_*`, `s3_*`) and
-ECR scans. The ECR and AWS read tools are gated on `AWS_REGION` /
+the AWS read tools (`sts_*`, `iam_*`, `ec2_describe_*`, `ecs_*`, `route53_*`,
+`s3_*`) and ECR scans. The ECR and AWS read tools are gated on `AWS_REGION` /
 `AWS_DEFAULT_REGION` being set, so set one of those in the pod even when
 credentials come from IRSA.
 
